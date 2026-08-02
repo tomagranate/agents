@@ -1,0 +1,623 @@
+#!/usr/bin/env bash
+# agents — inspect and sync global AGENTS.md + skills across harnesses
+set -euo pipefail
+
+AGENTS_VERSION="0.1.0"
+
+# --- package paths (repo / brew / install.sh) --------------------------------
+
+_resolve_script_path() {
+  local src="${BASH_SOURCE[0]}"
+  while [[ -L "$src" ]]; do
+    local dir
+    dir="$(cd -P "$(dirname "$src")" && pwd)"
+    src="$(readlink "$src")"
+    [[ "$src" != /* ]] && src="$dir/$src"
+  done
+  cd -P "$(dirname "$src")" && pwd
+}
+
+AGENTS_BIN_DIR="$(_resolve_script_path)"
+
+# Templates live next to the install:
+#   repo:           <root>/share/templates
+#   brew pkgshare:  <prefix>/share/agents/templates
+#   install.sh:     ~/.local/share/agents/templates  (or $AGENTS_SHARE)
+resolve_templates_dir() {
+  if [[ -n "${AGENTS_SHARE:-}" && -d "${AGENTS_SHARE}/templates" ]]; then
+    printf '%s' "${AGENTS_SHARE}/templates"
+    return
+  fi
+  local candidates=(
+    "$AGENTS_BIN_DIR/../share/templates"
+    "$AGENTS_BIN_DIR/../share/agents/templates"
+    "${XDG_DATA_HOME:-$HOME/.local/share}/agents/templates"
+    "/usr/local/share/agents/templates"
+    "/opt/homebrew/share/agents/templates"
+  )
+  local c
+  for c in "${candidates[@]}"; do
+    if [[ -d "$c" ]]; then
+      (cd "$c" && pwd)
+      return
+    fi
+  done
+  printf ''
+}
+
+TEMPLATES_DIR="$(resolve_templates_dir)"
+
+# --- user data paths --------------------------------------------------------
+
+HOME_DIR="${HOME}"
+AGENTS_HOME="${AGENTS_HOME:-$HOME_DIR/.agents}"
+SHARED_MD="$AGENTS_HOME/AGENTS.md"
+HARNESS_DIR="$AGENTS_HOME/harness"
+SHARED_SKILLS="$AGENTS_HOME/skills"
+
+CLAUDE_MD="$HOME_DIR/.claude/CLAUDE.md"
+CLAUDE_SKILLS="$HOME_DIR/.claude/skills"
+
+CODEX_MD="$HOME_DIR/.codex/AGENTS.md"
+CODEX_SKILLS="$HOME_DIR/.codex/skills"
+
+GROK_RULES="$HOME_DIR/.grok/rules"
+GROK_SKILLS="$HOME_DIR/.grok/skills"
+GROK_BUNDLED="$HOME_DIR/.grok/bundled/skills"
+
+OPENCODE_DIR="$HOME_DIR/.config/opencode"
+OPENCODE_MD="$OPENCODE_DIR/AGENTS.md"
+OPENCODE_JSONC="$OPENCODE_DIR/opencode.jsonc"
+OPENCODE_SKILLS="$OPENCODE_DIR/skills"
+
+HARNESSES=(claude codex grok opencode)
+
+die() { echo "error: $*" >&2; exit 1; }
+
+expand_path() {
+  local p="$1"
+  p="${p/#\~/$HOME_DIR}"
+  p="${p//\$HOME/$HOME_DIR}"
+  printf '%s' "$p"
+}
+
+# Expand Claude-style @path imports
+expand_claude_imports() {
+  local file="$1"
+  local depth="${2:-0}"
+  [[ -f "$file" ]] || return 0
+  if (( depth > 5 )); then
+    echo "<!-- import depth exceeded in $file -->"
+    return 0
+  fi
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" =~ ^@([^[:space:]]+)[[:space:]]*$ ]]; then
+      local target
+      target="$(expand_path "${BASH_REMATCH[1]}")"
+      if [[ -f "$target" ]]; then
+        echo "<!-- begin import: $target -->"
+        expand_claude_imports "$target" $((depth + 1))
+        echo "<!-- end import: $target -->"
+      else
+        echo "<!-- missing import: $target -->"
+        echo "$line"
+      fi
+    else
+      printf '%s\n' "$line"
+    fi
+  done <"$file"
+}
+
+file_nonempty() {
+  [[ -f "$1" ]] && grep -q '[^[:space:]]' "$1"
+}
+
+# --- resolved agents text ---------------------------------------------------
+
+resolved_claude() {
+  if [[ -f "$CLAUDE_MD" ]]; then
+    expand_claude_imports "$CLAUDE_MD"
+  else
+    echo "<!-- missing $CLAUDE_MD -->"
+    cat_shared_and_harness claude
+  fi
+}
+
+cat_shared_and_harness() {
+  local name="$1"
+  if [[ -f "$SHARED_MD" ]]; then
+    cat "$SHARED_MD"
+    echo
+  fi
+  local h="$HARNESS_DIR/${name}.md"
+  if file_nonempty "$h"; then
+    cat "$h"
+    echo
+  fi
+}
+
+resolved_codex() {
+  if [[ -f "$CODEX_MD" ]]; then
+    if [[ -L "$CODEX_MD" ]]; then
+      cat_shared_and_harness codex
+    else
+      cat "$CODEX_MD"
+    fi
+  else
+    cat_shared_and_harness codex
+  fi
+}
+
+resolved_grok() {
+  if [[ -d "$GROK_RULES" ]]; then
+    local any=0 f
+    while IFS= read -r f; do
+      [[ -z "$f" ]] && continue
+      any=1
+      echo "<!-- file: $f -->"
+      cat "$f"
+      echo
+    done < <(find "$GROK_RULES" -maxdepth 1 \( -type f -o -type l \) -name '*.md' 2>/dev/null | LC_ALL=C sort)
+    if [[ $any -eq 0 ]]; then
+      cat_shared_and_harness grok
+    fi
+  else
+    cat_shared_and_harness grok
+  fi
+}
+
+resolved_opencode() {
+  local listed=0
+  if [[ -f "$OPENCODE_JSONC" ]]; then
+    local paths
+    paths=$(python3 - "$OPENCODE_JSONC" <<'PY' 2>/dev/null || true
+import json, re, sys
+path = sys.argv[1]
+text = open(path).read()
+text = re.sub(r"//.*?$", "", text, flags=re.M)
+text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+try:
+    data = json.loads(text)
+except Exception:
+    sys.exit(0)
+for item in data.get("instructions") or []:
+    print(item)
+PY
+)
+    if [[ -n "${paths:-}" ]]; then
+      while IFS= read -r p; do
+        [[ -z "$p" ]] && continue
+        p="$(expand_path "$p")"
+        listed=1
+        echo "<!-- instructions: $p -->"
+        if [[ -f "$p" ]]; then
+          cat "$p"
+          echo
+        else
+          echo "<!-- missing: $p -->"
+        fi
+      done <<<"$paths"
+    fi
+  fi
+  if file_nonempty "$OPENCODE_MD"; then
+    listed=1
+    echo "<!-- file: $OPENCODE_MD -->"
+    cat "$OPENCODE_MD"
+    echo
+  fi
+  if [[ $listed -eq 0 ]]; then
+    cat_shared_and_harness opencode
+  fi
+}
+
+resolved_for() {
+  case "$1" in
+    claude) resolved_claude ;;
+    codex) resolved_codex ;;
+    grok) resolved_grok ;;
+    opencode) resolved_opencode ;;
+    *) die "unknown harness: $1 (claude|codex|grok|opencode)" ;;
+  esac
+}
+
+# --- skills discovery -------------------------------------------------------
+
+list_skill_names_in() {
+  local dir="$1"
+  [[ -d "$dir" ]] || return 0
+  find "$dir" -mindepth 1 -maxdepth 1 \( -type d -o -type l \) ! -name '.*' 2>/dev/null \
+    | while read -r d; do
+        local base
+        base="$(basename "$d")"
+        if [[ -f "$d/SKILL.md" || -L "$d/SKILL.md" ]]; then
+          printf '%s\n' "$base"
+        fi
+      done
+}
+
+skill_kind() {
+  local path="$1"
+  if [[ ! -e "$path" && ! -L "$path" ]]; then
+    echo "—"
+    return
+  fi
+  if [[ -L "$path" ]]; then
+    local target resolved
+    target="$(readlink "$path" || true)"
+    resolved="$(cd "$(dirname "$path")" && cd "$path" 2>/dev/null && pwd -P)" || resolved=""
+    if [[ "$target" == "$SHARED_SKILLS"/* ]] || [[ "$resolved" == "$SHARED_SKILLS"/* ]]; then
+      echo "link→shared"
+      return
+    fi
+    echo "link→other"
+    return
+  fi
+  if [[ -d "$path" ]]; then
+    case "$path" in
+      "$SHARED_SKILLS"/*) echo "shared" ;;
+      *) echo "local" ;;
+    esac
+    return
+  fi
+  echo "?"
+}
+
+cmd_skills() {
+  printf '%-28s %-10s %-14s %-14s %-14s %-14s\n' \
+    "SKILL" "shared" "claude" "codex" "grok" "opencode"
+  printf '%-28s %-10s %-14s %-14s %-14s %-14s\n' \
+    "----------------------------" "----------" "--------------" "--------------" "--------------" "--------------"
+
+  local names
+  names=$(
+    {
+      list_skill_names_in "$SHARED_SKILLS"
+      list_skill_names_in "$CLAUDE_SKILLS"
+      list_skill_names_in "$CODEX_SKILLS"
+      list_skill_names_in "$GROK_SKILLS"
+      list_skill_names_in "$OPENCODE_SKILLS"
+    } | LC_ALL=C sort -u
+  )
+
+  while IFS= read -r name; do
+    [[ -z "$name" ]] && continue
+    [[ "$name" == ".system" ]] && continue
+    local sh cl co gr oc
+    if [[ -d "$SHARED_SKILLS/$name" || -L "$SHARED_SKILLS/$name" ]]; then
+      sh="yes"
+    else
+      sh="—"
+    fi
+    cl="$(skill_kind "$CLAUDE_SKILLS/$name")"
+    co="$(skill_kind "$CODEX_SKILLS/$name")"
+    gr="$(skill_kind "$GROK_SKILLS/$name")"
+    oc="$(skill_kind "$OPENCODE_SKILLS/$name")"
+    if [[ "$cl" == "—" && -e "$CLAUDE_SKILLS/$name" ]]; then cl="yes"; fi
+    printf '%-28s %-10s %-14s %-14s %-14s %-14s\n' "$name" "$sh" "$cl" "$co" "$gr" "$oc"
+  done <<<"$names"
+
+  echo
+  echo "Legend: shared = lives in ~/.agents/skills | local = harness-only dir | link→shared = symlink to shared"
+  echo "Grok/OpenCode also load ~/.agents/skills natively even without a local copy."
+  if [[ -d "$GROK_BUNDLED" ]]; then
+    local n
+    n=$(list_skill_names_in "$GROK_BUNDLED" | wc -l | tr -d ' ')
+    echo "Grok bundled skills: $n under $GROK_BUNDLED (not listed above)"
+  fi
+  if [[ -d "$CODEX_SKILLS/.system" ]]; then
+    local n
+    n=$(list_skill_names_in "$CODEX_SKILLS/.system" | wc -l | tr -d ' ')
+    echo "Codex system skills: $n under $CODEX_SKILLS/.system (not listed above)"
+  fi
+}
+
+cmd_md() {
+  local filter="${1:-}"
+  if [[ -n "$filter" ]]; then
+    echo "======== $filter ========"
+    resolved_for "$filter"
+    return
+  fi
+  for h in "${HARNESSES[@]}"; do
+    echo "======== $h ========"
+    resolved_for "$h"
+    echo
+  done
+}
+
+cmd_paths() {
+  cat <<EOF
+version         $AGENTS_VERSION
+AGENTS_HOME     $AGENTS_HOME
+templates       ${TEMPLATES_DIR:-"(not found)"}
+shared AGENTS   $SHARED_MD
+harness dir     $HARNESS_DIR
+shared skills   $SHARED_SKILLS
+
+claude md       $CLAUDE_MD
+claude skills   $CLAUDE_SKILLS
+
+codex md        $CODEX_MD
+codex skills    $CODEX_SKILLS
+
+grok rules      $GROK_RULES
+grok skills     $GROK_SKILLS
+grok bundled    $GROK_BUNDLED
+
+opencode md     $OPENCODE_MD
+opencode jsonc  $OPENCODE_JSONC
+opencode skills $OPENCODE_SKILLS
+EOF
+}
+
+cmd_status() {
+  echo "agents $AGENTS_VERSION"
+  echo "Global agents home: $AGENTS_HOME"
+  echo "Templates: ${TEMPLATES_DIR:-not found}"
+  echo
+  echo "AGENTS sources"
+  printf '  %-12s %s\n' "shared" "$( [[ -f "$SHARED_MD" ]] && echo "ok  $SHARED_MD" || echo "MISSING" )"
+  local h f
+  for h in "${HARNESSES[@]}"; do
+    f="$HARNESS_DIR/${h}.md"
+    if file_nonempty "$f"; then
+      printf '  %-12s %s\n' "$h" "ok  $f"
+    elif [[ -f "$f" ]]; then
+      printf '  %-12s %s\n' "$h" "empty  $f"
+    else
+      printf '  %-12s %s\n' "$h" "MISSING  $f"
+    fi
+  done
+  echo
+  echo "Harness entrypoints"
+  printf '  %-12s %s\n' "claude" "$( [[ -f "$CLAUDE_MD" ]] && { [[ -L "$CLAUDE_MD" ]] && echo "symlink $(readlink "$CLAUDE_MD")" || echo "file $CLAUDE_MD"; } || echo MISSING )"
+  printf '  %-12s %s\n' "codex" "$( [[ -e "$CODEX_MD" ]] && { [[ -L "$CODEX_MD" ]] && echo "symlink $(readlink "$CODEX_MD")" || echo "file $CODEX_MD"; } || echo MISSING )"
+  printf '  %-12s %s\n' "grok" "$( [[ -d "$GROK_RULES" ]] && echo "dir $GROK_RULES ($(find "$GROK_RULES" -maxdepth 1 -name '*.md' 2>/dev/null | wc -l | tr -d ' ') md)" || echo MISSING )"
+  printf '  %-12s %s\n' "opencode" "$( [[ -f "$OPENCODE_JSONC" ]] && echo "jsonc $OPENCODE_JSONC" || echo MISSING )"
+  echo
+  local sc cc oc gc opc
+  sc=$(list_skill_names_in "$SHARED_SKILLS" | wc -l | tr -d ' ')
+  cc=$(list_skill_names_in "$CLAUDE_SKILLS" | wc -l | tr -d ' ')
+  oc=$(list_skill_names_in "$CODEX_SKILLS" | wc -l | tr -d ' ')
+  gc=$(list_skill_names_in "$GROK_SKILLS" | wc -l | tr -d ' ')
+  opc=$(list_skill_names_in "$OPENCODE_SKILLS" | wc -l | tr -d ' ')
+  echo "Skills (top-level SKILL.md dirs)"
+  printf '  %-12s %s\n' "shared" "$sc"
+  printf '  %-12s %s\n' "claude" "$cc"
+  printf '  %-12s %s\n' "codex" "$oc"
+  printf '  %-12s %s\n' "grok" "$gc"
+  printf '  %-12s %s\n' "opencode" "$opc"
+  echo
+  echo "Commands: agents init | agents sync | agents skills | agents md [harness]"
+}
+
+link_skill() {
+  local name="$1"
+  local dest_root="$2"
+  local src="$SHARED_SKILLS/$name"
+  local dest="$dest_root/$name"
+  mkdir -p "$dest_root"
+  if [[ -L "$dest" ]]; then
+    local cur
+    cur="$(readlink "$dest")"
+    if [[ "$cur" == "$src" ]]; then
+      return 0
+    fi
+    rm -f "$dest"
+    ln -s "$src" "$dest"
+    echo "  relinked $dest -> $src"
+    return 0
+  fi
+  if [[ -e "$dest" ]]; then
+    if [[ -f "$dest/SKILL.md" && -f "$src/SKILL.md" ]] && cmp -s "$dest/SKILL.md" "$src/SKILL.md"; then
+      echo "  skip $dest (local copy identical; leave in place)"
+      return 0
+    fi
+    echo "  conflict $dest (local differs from shared; leave local)"
+    return 0
+  fi
+  ln -s "$src" "$dest"
+  echo "  linked $dest -> $src"
+}
+
+install_file_if_missing() {
+  local src="$1"
+  local dest="$2"
+  local force="${3:-0}"
+  if [[ -f "$dest" && "$force" != "1" ]]; then
+    echo "  keep $dest"
+    return 0
+  fi
+  mkdir -p "$(dirname "$dest")"
+  cp "$src" "$dest"
+  echo "  wrote $dest"
+}
+
+cmd_init() {
+  local force=0
+  local do_sync=1
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --force) force=1 ;;
+      --no-sync) do_sync=0 ;;
+      -h|--help)
+        cat <<'EOF'
+Usage: agents init [--force] [--no-sync]
+
+Scaffold ~/.agents from packaged templates (missing files only).
+  --force     overwrite existing AGENTS.md / harness stubs
+  --no-sync   skip wiring harness entrypoints
+EOF
+        return 0
+        ;;
+      *) die "unknown init option: $1" ;;
+    esac
+    shift
+  done
+
+  if [[ -z "$TEMPLATES_DIR" || ! -d "$TEMPLATES_DIR" ]]; then
+    die "templates not found. Set AGENTS_SHARE or reinstall agents."
+  fi
+
+  echo "Scaffolding $AGENTS_HOME from $TEMPLATES_DIR"
+  mkdir -p "$HARNESS_DIR" "$SHARED_SKILLS"
+
+  if [[ -f "$TEMPLATES_DIR/AGENTS.md" ]]; then
+    install_file_if_missing "$TEMPLATES_DIR/AGENTS.md" "$SHARED_MD" "$force"
+  fi
+
+  local h
+  for h in "${HARNESSES[@]}"; do
+    if [[ -f "$TEMPLATES_DIR/harness/${h}.md" ]]; then
+      install_file_if_missing "$TEMPLATES_DIR/harness/${h}.md" "$HARNESS_DIR/${h}.md" "$force"
+    elif [[ ! -f "$HARNESS_DIR/${h}.md" ]]; then
+      printf '## %s\n\nHarness-only global rules go here.\n' "$h" >"$HARNESS_DIR/${h}.md"
+      echo "  wrote $HARNESS_DIR/${h}.md"
+    fi
+  done
+
+  if [[ "$do_sync" == "1" ]]; then
+    echo
+    cmd_sync
+  else
+    echo
+    echo "Done. Run: agents sync"
+  fi
+}
+
+cmd_sync() {
+  echo "Syncing agents entrypoints..."
+  mkdir -p "$HARNESS_DIR" "$CLAUDE_SKILLS" "$CODEX_SKILLS" "$GROK_RULES" "$GROK_SKILLS" "$OPENCODE_DIR" "$OPENCODE_SKILLS"
+
+  if [[ ! -f "$SHARED_MD" ]]; then
+    die "missing $SHARED_MD — run: agents init"
+  fi
+
+  local h f
+  for h in "${HARNESSES[@]}"; do
+    f="$HARNESS_DIR/${h}.md"
+    if [[ ! -f "$f" ]]; then
+      printf '## %s\n\nHarness-only global rules go here.\n' "$h" >"$f"
+      echo "  created $f"
+    fi
+  done
+
+  # Claude: thin file with @imports (Claude expands ~)
+  mkdir -p "$(dirname "$CLAUDE_MD")"
+  cat >"$CLAUDE_MD" <<EOF
+@~/.agents/AGENTS.md
+@~/.agents/harness/claude.md
+EOF
+  echo "  wrote $CLAUDE_MD"
+
+  # Codex: composed file. Never write through a symlink to shared.
+  mkdir -p "$(dirname "$CODEX_MD")"
+  if [[ -L "$CODEX_MD" ]]; then
+    rm -f "$CODEX_MD"
+  fi
+  local codex_tmp
+  codex_tmp="$(mktemp "${TMPDIR:-/tmp}/codex-agents.XXXXXX")"
+  {
+    echo "<!-- Generated by \`agents sync\`. Edit ~/.agents/AGENTS.md and ~/.agents/harness/codex.md -->"
+    echo
+    cat "$SHARED_MD"
+    echo
+    if file_nonempty "$HARNESS_DIR/codex.md"; then
+      cat "$HARNESS_DIR/codex.md"
+      echo
+    fi
+  } >"$codex_tmp"
+  mv -f "$codex_tmp" "$CODEX_MD"
+  echo "  wrote $CODEX_MD"
+
+  # Grok: rules dir symlinks
+  ln -sfn "$SHARED_MD" "$GROK_RULES/AGENTS.md"
+  ln -sfn "$HARNESS_DIR/grok.md" "$GROK_RULES/harness-grok.md"
+  echo "  linked $GROK_RULES/AGENTS.md"
+  echo "  linked $GROK_RULES/harness-grok.md"
+
+  # OpenCode: instructions + thin AGENTS.md
+  cat >"$OPENCODE_JSONC" <<EOF
+{
+  "\$schema": "https://opencode.ai/config.json",
+  "instructions": [
+    "$SHARED_MD",
+    "$HARNESS_DIR/opencode.md"
+  ]
+}
+EOF
+  echo "  wrote $OPENCODE_JSONC"
+
+  if [[ ! -f "$OPENCODE_MD" ]] || grep -qE 'OpenCode-only|via `opencode.jsonc`' "$OPENCODE_MD" 2>/dev/null; then
+    cat >"$OPENCODE_MD" <<'EOF'
+## OpenCode
+
+Harness-only notes. Shared + OpenCode rules load from `opencode.jsonc` `instructions`
+(`~/.agents/AGENTS.md` and `~/.agents/harness/opencode.md`).
+EOF
+    echo "  wrote $OPENCODE_MD"
+  fi
+
+  echo
+  echo "Linking shared skills into Claude + Codex..."
+  if [[ -d "$SHARED_SKILLS" ]]; then
+    local name
+    while IFS= read -r name; do
+      [[ -z "$name" ]] && continue
+      link_skill "$name" "$CLAUDE_SKILLS"
+      link_skill "$name" "$CODEX_SKILLS"
+    done < <(list_skill_names_in "$SHARED_SKILLS")
+  else
+    echo "  no $SHARED_SKILLS"
+  fi
+
+  echo
+  echo "Done. Run: agents skills | agents md"
+}
+
+cmd_help() {
+  cat <<EOF
+agents $AGENTS_VERSION — global AGENTS.md + skills across Claude, Codex, Grok, OpenCode
+
+Usage:
+  agents              Status overview
+  agents status       Same as default
+  agents init         Scaffold ~/.agents from templates, then sync
+  agents skills       Skill matrix (where each skill is installed)
+  agents md [name]    Full resolved AGENTS text (all or one harness)
+  agents sync         Wire entrypoints + link shared skills
+  agents paths        Print important paths
+  agents version      Print version
+  agents help         This help
+
+Edit:
+  ~/.agents/AGENTS.md              shared rules
+  ~/.agents/harness/<harness>.md   harness-only rules
+  ~/.agents/skills/<name>/         shared skills (then: agents sync)
+
+Harness-only skills stay in:
+  ~/.claude/skills  ~/.codex/skills  ~/.grok/skills  ~/.config/opencode/skills
+
+Install:
+  curl -fsSL https://raw.githubusercontent.com/tomagranate/agents/main/install.sh | sh
+  brew install tomagranate/tap/agents
+EOF
+}
+
+main() {
+  local cmd="${1:-status}"
+  shift || true
+  case "$cmd" in
+    status|st) cmd_status ;;
+    init) cmd_init "$@" ;;
+    skills|sk) cmd_skills ;;
+    md|agents-md) cmd_md "${1:-}" ;;
+    sync) cmd_sync ;;
+    paths|path) cmd_paths ;;
+    version|--version|-V) echo "agents $AGENTS_VERSION" ;;
+    help|-h|--help) cmd_help ;;
+    *) die "unknown command: $cmd (try: agents help)" ;;
+  esac
+}
+
+main "$@"
