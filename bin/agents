@@ -2,7 +2,7 @@
 # agents — inspect and sync global AGENTS.md + skills across harnesses
 set -euo pipefail
 
-AGENTS_VERSION="0.1.0"
+AGENTS_VERSION="0.2.0"
 
 # --- package paths (repo / brew / install.sh) --------------------------------
 
@@ -575,6 +575,81 @@ EOF
   echo "Done. Run: agents skills | agents md"
 }
 
+cmd_pull() {
+  local do_sync=1
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --no-sync) do_sync=0 ;;
+      -h|--help)
+        cat <<'EOF'
+Usage: agents pull [--no-sync]
+
+git -C ~/.agents pull --ff-only, then agents sync.
+Requires ~/.agents to be a git checkout (e.g. agents-home).
+EOF
+        return 0
+        ;;
+      *) die "unknown pull option: $1" ;;
+    esac
+    shift
+  done
+
+  [[ -d "$AGENTS_HOME/.git" ]] || die "$AGENTS_HOME is not a git repo (clone agents-home first)"
+
+  echo "Pulling $AGENTS_HOME..."
+  git -C "$AGENTS_HOME" pull --ff-only
+  if [[ "$do_sync" == "1" ]]; then
+    echo
+    cmd_sync
+  else
+    echo "Skipped sync. Run: agents sync"
+  fi
+}
+
+cmd_push() {
+  local message=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -m|--message)
+        shift
+        message="${1:-}"
+        [[ -n "$message" ]] || die "empty commit message"
+        ;;
+      -h|--help)
+        cat <<'EOF'
+Usage: agents push [-m "message"]
+
+Commit any local changes in ~/.agents (if needed) and git push.
+With -m, stages all changes and commits before push.
+Without -m, only pushes existing commits (fails if working tree dirty).
+EOF
+        return 0
+        ;;
+      *) die "unknown push option: $1" ;;
+    esac
+    shift
+  done
+
+  [[ -d "$AGENTS_HOME/.git" ]] || die "$AGENTS_HOME is not a git repo (clone agents-home first)"
+
+  if [[ -n "$message" ]]; then
+    git -C "$AGENTS_HOME" add -A
+    if git -C "$AGENTS_HOME" diff --cached --quiet; then
+      echo "Nothing to commit."
+    else
+      git -C "$AGENTS_HOME" commit -m "$message"
+    fi
+  else
+    if ! git -C "$AGENTS_HOME" diff --quiet || ! git -C "$AGENTS_HOME" diff --cached --quiet; then
+      die "working tree dirty; commit first or use: agents push -m \"message\""
+    fi
+  fi
+
+  echo "Pushing $AGENTS_HOME..."
+  git -C "$AGENTS_HOME" push
+  echo "Done."
+}
+
 cmd_help() {
   cat <<EOF
 agents $AGENTS_VERSION — global AGENTS.md + skills across Claude, Codex, Grok, OpenCode
@@ -583,6 +658,8 @@ Usage:
   agents              Status overview
   agents status       Same as default
   agents init         Scaffold ~/.agents from templates, then sync
+  agents pull         git pull --ff-only in ~/.agents, then sync
+  agents push [-m]    git push ~/.agents (optional commit with -m)
   agents skills       Skill matrix (where each skill is installed)
   agents md [name]    Full resolved AGENTS text (all or one harness)
   agents sync         Wire entrypoints + link shared skills
@@ -594,6 +671,9 @@ Edit:
   ~/.agents/AGENTS.md              shared rules
   ~/.agents/harness/<harness>.md   harness-only rules
   ~/.agents/skills/<name>/         shared skills (then: agents sync)
+
+Multi-machine content repo:
+  git@github.com:tomagranate/agents-home.git  →  ~/.agents
 
 Harness-only skills stay in:
   ~/.claude/skills  ~/.codex/skills  ~/.grok/skills  ~/.config/opencode/skills
@@ -610,6 +690,8 @@ main() {
   case "$cmd" in
     status|st) cmd_status ;;
     init) cmd_init "$@" ;;
+    pull) cmd_pull "$@" ;;
+    push) cmd_push "$@" ;;
     skills|sk) cmd_skills ;;
     md|agents-md) cmd_md "${1:-}" ;;
     sync) cmd_sync ;;

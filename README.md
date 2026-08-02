@@ -54,12 +54,18 @@ agents init
 ## Quick start
 
 ```sh
-agents init      # scaffold ~/.agents + wire harnesses
+# Personal multi-machine content (recommended)
+git clone git@github.com:tomagranate/agents-home.git ~/.agents
+agents sync
+
+# Or scaffold empty templates on a fresh machine
+agents init
+
 agents status    # overview
 agents skills    # skill matrix
 agents md        # full resolved rules per harness
-agents md claude # one harness
-agents sync      # re-wire after edits
+agents pull      # git pull + sync (when using agents-home)
+agents push -m "msg"  # commit + push agents-home
 ```
 
 ## Layout
@@ -103,11 +109,23 @@ Grok and OpenCode also discover `~/.agents/skills` natively. Claude and Codex ge
 | **Grok** | `~/.grok/rules/*.md` symlinks to shared + harness |
 | **OpenCode** | `~/.config/opencode/opencode.jsonc` `instructions` list |
 
+## Multi-machine content
+
+Put personal rules/skills in a private git repo that **is** `~/.agents`
+(see [agents-home](https://github.com/tomagranate/agents-home) for the intended layout).
+
+```sh
+agents pull              # git -C ~/.agents pull --ff-only && agents sync
+agents push -m "Update"  # commit all + push
+```
+
 ## Commands
 
 ```
 agents              Status overview
 agents init         Scaffold ~/.agents from templates, then sync
+agents pull         Pull agents-home + sync
+agents push [-m]    Push agents-home (optional commit)
 agents skills       Where each skill lives
 agents md [name]    Full resolved AGENTS text
 agents sync         Wire entrypoints + link shared skills
