@@ -9,17 +9,55 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Test
+        run: cargo test --locked
+      - name: Build
+        run: cargo build --locked --release --target "${{ matrix.target }}"
+      - name: Package
+        shell: bash
+        run: |
+          asset="agents-${{ matrix.target }}.tar.gz"
+          tar -czf "$asset" -C "target/${{ matrix.target }}/release" agents
+          if command -v shasum >/dev/null; then
+            shasum -a 256 "$asset" > "$asset.sha256"
+          else
+            sha256sum "$asset" > "$asset.sha256"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agents-${{ matrix.target }}
+          path: |
+            agents-${{ matrix.target }}.tar.gz
+            agents-${{ matrix.target }}.tar.gz.sha256
+
+  publish:
+    needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Create GitHub Release
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: agents-*
+          merge-multiple: true
+      - name: Publish GitHub release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          gh release create "$GITHUB_REF_NAME" \
-            --title "agents $VERSION" \
-            --generate-notes \
-            --verify-tag
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" --generate-notes agents-*.tar.gz agents-*.sha256

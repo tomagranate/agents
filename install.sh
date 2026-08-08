@@ -1,164 +1,115 @@
 #!/usr/bin/env bash
-#
-# Install agents CLI
-#
-# Usage:
-#   curl -fsSL https://raw.githubusercontent.com/tomagranate/agents/main/install.sh | sh
-#
-# Environment:
-#   INSTALL_DIR   Binary dir (default: ~/.local/bin)
-#   SHARE_DIR     Data/templates dir (default: ~/.local/share/agents)
-#   VERSION       Tag without v, or "main" (default: latest release, else main)
-#   SKIP_INIT     Set to 1 to skip agents init after install
-#   FORCE_INIT    Set to 1 to pass --force to agents init
-#
+# Install the standalone agents binary.
 set -euo pipefail
 
 REPO="tomagranate/agents"
-GITHUB_URL="https://github.com/${REPO}"
-RAW_URL="https://raw.githubusercontent.com/${REPO}"
+INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
+INSTALL_TEMPORARY=""
 
-BOLD='\033[1m'
-DIM='\033[2m'
-RESET='\033[0m'
-CYAN='\033[0;36m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-RED='\033[0;31m'
-
-step() { echo -e "  ${CYAN}▸${RESET} $1"; }
-success() { echo -e "  ${GREEN}✓${RESET} $1"; }
-warn() { echo -e "  ${YELLOW}!${RESET} $1"; }
-error() { echo -e "  ${RED}✗${RESET} $1" >&2; exit 1; }
-
-print_header() {
-  echo
-  echo -e "${CYAN}${BOLD}"
-  echo "  ╭─────────────────────────────────╮"
-  echo "  │         agents installer        │"
-  echo "  ╰─────────────────────────────────╯"
-  echo -e "${RESET}"
+cleanup() {
+  if [[ -n "$INSTALL_TEMPORARY" && -d "$INSTALL_TEMPORARY" ]]; then
+    rm -rf -- "$INSTALL_TEMPORARY"
+  fi
 }
 
-need_cmd() {
-  command -v "$1" >/dev/null 2>&1 || error "need '$1' on PATH"
+fail() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || fail "need '$1' on PATH"
 }
 
 resolve_version() {
   if [[ -n "${VERSION:-}" ]]; then
-    echo "$VERSION"
+    printf '%s' "${VERSION#v}"
     return
   fi
-  local tag
-  tag=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
-    | sed -n 's/.*"tag_name": *"\(v\{0,1\}[^"]*\)".*/\1/p' | head -1 || true)
-  if [[ -n "$tag" ]]; then
-    echo "${tag#v}"
+  curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
+    | sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' \
+    | head -1
+}
+
+release_target() {
+  local os arch
+  os="$(uname -s)"
+  arch="$(uname -m)"
+  case "$os/$arch" in
+    Darwin/arm64) printf 'aarch64-apple-darwin' ;;
+    Darwin/x86_64) printf 'x86_64-apple-darwin' ;;
+    Linux/x86_64) printf 'x86_64-unknown-linux-gnu' ;;
+    Linux/aarch64|Linux/arm64) printf 'aarch64-unknown-linux-gnu' ;;
+    *) fail "no release build for $os/$arch" ;;
+  esac
+}
+
+sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
   else
-    echo "main"
+    sha256sum "$1" | awk '{print $1}'
   fi
 }
 
-main() {
-  print_header
-  need_cmd curl
-  need_cmd tar
-  need_cmd mkdir
+install_release() {
+  local version="$1" target="$2" temporary="$3"
+  local asset="agents-$target.tar.gz"
+  local base="https://github.com/$REPO/releases/download/v$version"
+  printf 'Downloading agents %s for %s...\n' "$version" "$target"
+  curl -fsSL "$base/$asset" -o "$temporary/$asset"
+  curl -fsSL "$base/$asset.sha256" -o "$temporary/$asset.sha256"
+  local expected actual
+  expected="$(awk '{print $1}' "$temporary/$asset.sha256")"
+  actual="$(sha256_file "$temporary/$asset")"
+  [[ -n "$expected" && "$actual" == "$expected" ]] || fail "release checksum mismatch"
+  tar -xzf "$temporary/$asset" -C "$temporary"
+  [[ -x "$temporary/agents" ]] || fail "release archive has no agents binary"
+  mkdir -p "$INSTALL_DIR"
+  install -m 755 "$temporary/agents" "$INSTALL_DIR/agents"
+}
 
-  local version ref archive_url tmp install_dir share_dir
+install_main() {
+  local temporary="$1"
+  need cargo
+  printf 'Building agents from main...\n'
+  curl -fsSL "https://github.com/$REPO/archive/refs/heads/main.tar.gz" -o "$temporary/main.tar.gz"
+  tar -xzf "$temporary/main.tar.gz" -C "$temporary"
+  local source
+  source="$(find "$temporary" -maxdepth 1 -type d -name 'agents-*' | head -1)"
+  [[ -f "$source/Cargo.toml" ]] || fail "source archive is invalid"
+  cargo build --locked --release --manifest-path "$source/Cargo.toml"
+  mkdir -p "$INSTALL_DIR"
+  install -m 755 "$source/target/release/agents" "$INSTALL_DIR/agents"
+}
+
+main() {
+  need curl
+  need tar
+  need install
+  local version target temporary
   version="$(resolve_version)"
-  install_dir="${INSTALL_DIR:-$HOME/.local/bin}"
-  share_dir="${SHARE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/agents}"
+  [[ -n "$version" ]] || fail "could not find a release"
+  target="$(release_target)"
+  temporary="$(mktemp -d "${TMPDIR:-/tmp}/agents-install.XXXXXX")"
+  INSTALL_TEMPORARY="$temporary"
+  trap cleanup EXIT
 
   if [[ "$version" == "main" || "$version" == "master" ]]; then
-    ref="$version"
-    archive_url="${GITHUB_URL}/archive/refs/heads/${ref}.tar.gz"
+    install_main "$temporary"
   else
-    ref="v${version#v}"
-    archive_url="${GITHUB_URL}/archive/refs/tags/${ref}.tar.gz"
+    install_release "$version" "$target" "$temporary"
   fi
 
-  step "Installing agents ${version}"
-  echo -e "    ${DIM}bin → ${install_dir}${RESET}"
-  echo -e "    ${DIM}share → ${share_dir}${RESET}"
-  echo -e "    ${DIM}source → ${archive_url}${RESET}"
-
-  tmp="$(mktemp -d "${TMPDIR:-/tmp}/agents-install.XXXXXX")"
-  # shellcheck disable=SC2064
-  trap "rm -rf '$tmp'" EXIT
-
-  step "Downloading"
-  if ! curl -fsSL "$archive_url" -o "$tmp/src.tar.gz"; then
-    if [[ "$version" != "main" ]]; then
-      warn "tag download failed; falling back to main"
-      archive_url="${GITHUB_URL}/archive/refs/heads/main.tar.gz"
-      curl -fsSL "$archive_url" -o "$tmp/src.tar.gz" || error "download failed"
-      ref="main"
-    else
-      error "download failed"
-    fi
-  fi
-
-  step "Extracting"
-  tar -xzf "$tmp/src.tar.gz" -C "$tmp"
-  local root
-  root="$(find "$tmp" -maxdepth 1 -type d -name 'agents-*' | head -1)"
-  [[ -n "$root" && -f "$root/bin/agents" ]] || error "unexpected archive layout"
-
-  step "Installing files"
-  mkdir -p "$install_dir" "$share_dir/templates"
-  install -m 755 "$root/bin/agents" "$install_dir/agents"
-  # Sync version string if VERSION file present
-  if [[ -f "$root/VERSION" ]]; then
-    local ver
-    ver="$(tr -d '[:space:]' <"$root/VERSION")"
-    # rewrite embedded version if needed
-    if ! grep -q "AGENTS_VERSION=\"$ver\"" "$install_dir/agents"; then
-      sed -i.bak "s/^AGENTS_VERSION=.*/AGENTS_VERSION=\"$ver\"/" "$install_dir/agents" 2>/dev/null \
-        || sed -i '' "s/^AGENTS_VERSION=.*/AGENTS_VERSION=\"$ver\"/" "$install_dir/agents"
-      rm -f "$install_dir/agents.bak"
-    fi
-  fi
-  rm -rf "$share_dir/templates"
-  cp -R "$root/share/templates" "$share_dir/templates"
-  success "installed $install_dir/agents"
-  success "templates → $share_dir/templates"
-
-  # PATH hint
+  printf 'Installed %s\n' "$INSTALL_DIR/agents"
+  "$INSTALL_DIR/agents" version
   case ":$PATH:" in
-    *":$install_dir:"*) ;;
-    *)
-      warn "Add to PATH (e.g. in ~/.zshrc):"
-      echo -e "    ${DIM}export PATH=\"${install_dir}:\$PATH\"${RESET}"
-      ;;
+    *":$INSTALL_DIR:"*) ;;
+    *) printf 'Add %s to PATH.\n' "$INSTALL_DIR" ;;
   esac
-
-  export AGENTS_SHARE="$share_dir"
-  export PATH="$install_dir:$PATH"
-
-  if [[ "${SKIP_INIT:-0}" == "1" ]]; then
-    warn "Skipping init (SKIP_INIT=1)"
-  else
-    step "Scaffolding config (agents init)"
-    if [[ "${FORCE_INIT:-0}" == "1" ]]; then
-      "$install_dir/agents" init --force || warn "init failed; run manually: agents init"
-    else
-      "$install_dir/agents" init || warn "init failed; run manually: agents init"
-    fi
+  if [[ "${SKIP_INIT:-0}" != "1" && ! -f "$HOME/.agents/AGENTS.md" ]]; then
+    "$INSTALL_DIR/agents" init
   fi
-
-  echo
-  success "agents is ready"
-  echo -e "    ${DIM}$("$install_dir/agents" version 2>/dev/null || echo agents)${RESET}"
-  echo
-  echo "  Next:"
-  echo "    agents status"
-  echo "    agents skills"
-  echo "    agents md"
-  echo
-  echo "  Edit shared rules:"
-  echo "    \$EDITOR ~/.agents/AGENTS.md"
-  echo
 }
 
 main "$@"
