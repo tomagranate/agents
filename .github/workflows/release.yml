@@ -42,7 +42,7 @@ jobs:
           else
             sha256sum "$asset" > "$asset.sha256"
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: agents-${{ matrix.target }}
           path: |
@@ -53,11 +53,11 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           pattern: agents-*
           merge-multiple: true
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" --generate-notes agents-*.tar.gz agents-*.sha256
+        run: gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --generate-notes agents-*.tar.gz agents-*.sha256
