@@ -1,42 +1,33 @@
 # agents
 
-Sync and inspect **global** `AGENTS.md` rules and skills across AI coding harnesses:
+`agents` manages shared AI agent rules, skills, and normalized chat archives.
 
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
-- [OpenAI Codex](https://github.com/openai/codex)
-- [Grok Build](https://grok.x.ai/)
-- [OpenCode](https://opencode.ai/)
+It supports these harnesses:
 
-One shared rules file. Optional per-harness extras. One CLI to see what is installed and what each harness actually loads.
+- Claude Code
+- OpenAI Codex
+- Grok
+- OpenCode
+
+The CLI is one Rust binary. It does not require Python, Node.js, or a separate SQLite installation.
 
 ## Install
 
-### One-liner
+### Standalone
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/tomagranate/agents/main/install.sh | sh
 ```
 
-Options via env:
+Set `INSTALL_DIR` to change the destination. The default is `~/.local/bin`.
 
-| Variable | Default | Meaning |
-|----------|---------|---------|
-| `INSTALL_DIR` | `~/.local/bin` | Where the `agents` binary goes |
-| `SHARE_DIR` | `~/.local/share/agents` | Templates / package data |
-| `VERSION` | latest release, else `main` | Tag without `v`, or `main` |
-| `SKIP_INIT` | unset | Set `1` to skip scaffolding |
-| `FORCE_INIT` | unset | Set `1` to overwrite scaffold files |
-
-```sh
-# install CLI only, keep existing ~/.agents as-is
-SKIP_INIT=1 curl -fsSL https://raw.githubusercontent.com/tomagranate/agents/main/install.sh | sh
-```
+Set `SKIP_INIT=1` to skip initial configuration.
 
 ### Homebrew
 
 ```sh
 brew install tomagranate/tap/agents
-agents init    # first time only
+agents init
 ```
 
 ### From source
@@ -44,104 +35,144 @@ agents init    # first time only
 ```sh
 git clone https://github.com/tomagranate/agents.git
 cd agents
-install -m 755 bin/agents ~/.local/bin/agents
-mkdir -p ~/.local/share/agents
-cp -R share/templates ~/.local/share/agents/
-export AGENTS_SHARE=~/.local/share/agents
+cargo install --path .
 agents init
 ```
 
-## Quick start
+## Shared configuration
 
-```sh
-# Personal multi-machine content (recommended)
-git clone git@github.com:tomagranate/agents-home.git ~/.agents
-agents sync
+Use a private Git repository at `~/.agents` for personal rules and shared skills.
 
-# Or scaffold empty templates on a fresh machine
-agents init
-
-agents status    # overview
-agents skills    # skill matrix
-agents md        # full resolved rules per harness
-agents pull      # git pull + sync (when using agents-home)
-agents push -m "msg"  # commit + push agents-home
-```
-
-## Layout
-
-```
+```text
 ~/.agents/
-  AGENTS.md                 # shared rules (edit for all harnesses)
+  AGENTS.md
   harness/
-    claude.md               # Claude Code only
-    codex.md                # Codex only
-    grok.md                 # Grok only
-    opencode.md             # OpenCode only
-  skills/<name>/SKILL.md    # shared skills → agents sync links into Claude/Codex
+    claude.md
+    codex.md
+    grok.md
+    opencode.md
+  skills/<name>/SKILL.md
 ```
 
-| Goal | Action |
-|------|--------|
-| Rule for every harness | Edit `~/.agents/AGENTS.md` |
-| Rule for one harness | Edit `~/.agents/harness/<name>.md`, then `agents sync` |
-| Shared skill | Add `~/.agents/skills/<name>/SKILL.md`, then `agents sync` |
-| Harness-only skill | Put it only under that harness’s skills dir |
-
-### Harness skill directories
-
-| Scope | Path |
-|-------|------|
-| Shared | `~/.agents/skills/` |
-| Claude | `~/.claude/skills/` |
-| Codex | `~/.codex/skills/` |
-| Grok | `~/.grok/skills/` |
-| OpenCode | `~/.config/opencode/skills/` |
-
-Grok and OpenCode also discover `~/.agents/skills` natively. Claude and Codex get symlinks from `agents sync`.
-
-## How each harness is wired
-
-| Harness | Mechanism |
-|---------|-----------|
-| **Claude** | `~/.claude/CLAUDE.md` imports `@~/.agents/AGENTS.md` and harness file |
-| **Codex** | `~/.codex/AGENTS.md` composed on `sync` (shared + harness) |
-| **Grok** | `~/.grok/rules/*.md` symlinks to shared + harness |
-| **OpenCode** | `~/.config/opencode/opencode.jsonc` `instructions` list |
-
-## Multi-machine content
-
-Put personal rules/skills in a private git repo that **is** `~/.agents`
-(see [agents-home](https://github.com/tomagranate/agents-home) for the intended layout).
+Common commands:
 
 ```sh
-agents pull              # git -C ~/.agents pull --ff-only && agents sync
-agents push -m "Update"  # commit all + push
+agents status
+agents init
+agents sync
+agents skills
+agents md
+agents pull
+agents push -m "Update shared rules"
 ```
 
-## Commands
+`agents sync` wires shared rules into each installed harness.
 
+## Chat archive
+
+The archive uses a separate private Git repository. Do not store chat data in `agents-home`.
+
+Initialize a local repository:
+
+```sh
+agents archive init --path ~/.local/share/agents/chat-archive
 ```
-agents              Status overview
-agents init         Scaffold ~/.agents from templates, then sync
-agents pull         Pull agents-home + sync
-agents push [-m]    Push agents-home (optional commit)
-agents skills       Where each skill lives
-agents md [name]    Full resolved AGENTS text
-agents sync         Wire entrypoints + link shared skills
-agents paths        Print paths
-agents version      Print version
-agents help         Help
+
+Connect an existing private remote:
+
+```sh
+agents archive init \
+  --path ~/.local/share/agents/chat-archive \
+  --remote git@github.com:OWNER/chat-archive.git
 ```
+
+Ingest local history:
+
+```sh
+agents archive update
+agents archive status
+agents archive search "liquid glass"
+agents archive verify
+```
+
+Pull, ingest, commit, and push in one operation:
+
+```sh
+agents archive sync
+```
+
+### Archive layout
+
+```text
+chat-archive/
+  objects/sha256/<prefix>/<hash>.jsonl
+  refs/<machine-id>/<source>/<session-id>.json
+  machines/<machine-id>.json
+  schema/v1/
+```
+
+Session objects are immutable and content-addressed. Identical normalized sessions share one object.
+
+Updates prune unreferenced working-tree objects. Git retains objects from committed revisions.
+
+Each machine writes only its own references. This structure prevents most Git conflicts.
+
+The command stores its searchable SQLite index outside the repository:
+
+```text
+~/.local/state/agents/chat-archive.sqlite
+```
+
+The index uses SQLite FTS5. The binary includes SQLite.
+
+The default policy retains:
+
+- User and assistant messages.
+- Readable summaries and memory.
+- Model and provider identifiers.
+- Tool names without tool payloads.
+- Session titles, dates, projects, and branches.
+
+The default policy excludes:
+
+- Tool inputs and outputs.
+- Terminal logs and file dumps.
+- Images, audio, and binary artifacts.
+- Hidden or encrypted reasoning.
+- System and developer prompts.
+- Authentication and token data.
+
+Updates scan source fingerprints first. Rust workers parse changed sources in parallel.
+
+Normalizer versions are part of each fingerprint. Schema changes can reprocess old sources safely.
+
+Missing local histories do not delete archived sessions.
+
+## Update the command
+
+Use either command:
+
+```sh
+agents update
+agents upgrade
+```
+
+For Homebrew installations, the command uses `brew upgrade agents`.
+
+For standalone installations, it downloads the matching release asset. It verifies the SHA-256 checksum before replacement.
+
+Use `agents update --check` to check without installing.
 
 ## Development
 
 ```sh
-./bin/agents help
-./bin/agents status
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --locked
+cargo build --release --locked
 ```
 
-Bump `VERSION` and the `AGENTS_VERSION` string in `bin/agents` together when cutting a release.
+Release tags build binaries for macOS and Linux. GitHub Actions publishes archives and checksums.
 
 ## License
 
