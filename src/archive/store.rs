@@ -635,6 +635,7 @@ pub fn counts(
 
 pub fn search(paths: &Paths, query: &str, limit: usize) -> Result<()> {
     let connection = state_connection(paths)?;
+    let query = literal_fts_query(query)?;
     let mut shown = HashSet::new();
     let mut statement = connection.prepare(
         "SELECT s.logical_id, s.source, s.title, m.role, snippet(messages_fts, 2, '[', ']', '…', 18) \
@@ -642,7 +643,7 @@ pub fn search(paths: &Paths, query: &str, limit: usize) -> Result<()> {
          ON m.logical_id=messages_fts.logical_id AND m.sequence=messages_fts.sequence \
          WHERE messages_fts MATCH ?1 ORDER BY bm25(messages_fts) LIMIT ?2",
     )?;
-    let rows = statement.query_map(params![query, limit as i64], |row| {
+    let rows = statement.query_map(params![&query, limit as i64], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
@@ -672,7 +673,7 @@ pub fn search(paths: &Paths, query: &str, limit: usize) -> Result<()> {
              FROM sessions_fts JOIN sessions s USING(logical_id) \
              WHERE sessions_fts MATCH ?1 ORDER BY bm25(sessions_fts) LIMIT ?2",
         )?;
-        let rows = metadata.query_map(params![query, limit as i64], |row| {
+        let rows = metadata.query_map(params![&query, limit as i64], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -693,6 +694,17 @@ pub fn search(paths: &Paths, query: &str, limit: usize) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn literal_fts_query(query: &str) -> Result<String> {
+    let terms = query
+        .split_whitespace()
+        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+        .collect::<Vec<_>>();
+    if terms.is_empty() {
+        bail!("search query is empty");
+    }
+    Ok(terms.join(" "))
 }
 
 pub fn show(paths: &Paths, config: &ArchiveConfig, id: &str) -> Result<()> {

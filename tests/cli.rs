@@ -259,7 +259,7 @@ fn syncs_machine_owned_refs_through_one_remote() {
         1
     );
     agents(&machine_b)
-        .args(["archive", "search", "machine"])
+        .args(["archive", "search", "machine-a"])
         .assert()
         .success()
         .stdout(predicate::str::contains("metadata:"));
@@ -350,7 +350,7 @@ fn syncs_machine_owned_refs_through_one_remote() {
         .stdout(predicate::str::contains("Available objects verified: 0"))
         .stdout(predicate::str::contains("Remote objects: 2"));
     agents(&machine_b)
-        .args(["archive", "search", "machine"])
+        .args(["archive", "search", "machine-a"])
         .assert()
         .success()
         .stdout(predicate::str::contains("metadata:"));
