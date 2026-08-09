@@ -61,3 +61,30 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --generate-notes agents-*.tar.gz agents-*.sha256
+
+  update-homebrew:
+    name: Update Homebrew formula
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Extract version
+        id: version
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger Homebrew tap update
+        uses: peter-evans/repository-dispatch@v4
+        with:
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          repository: ${{ github.repository_owner }}/homebrew-tap
+          event-type: update-formula
+          client-payload: |
+            {
+              "formula": "agents",
+              "version": "${{ steps.version.outputs.version }}",
+              "repo": "${{ github.repository }}",
+              "desc": "Manage shared AI agent configuration and chat archives",
+              "homepage": "https://github.com/${{ github.repository }}",
+              "license": "MIT",
+              "asset_style": "rust-target"
+            }
