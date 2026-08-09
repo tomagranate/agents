@@ -2,7 +2,7 @@ mod adapters;
 mod model;
 mod store;
 
-use std::{fs, path::PathBuf, process::Command};
+use std::{fs, path::PathBuf, process::Command, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
@@ -22,7 +22,7 @@ This private repository stores normalized chat history from supported AI harness
 
 Archive clones keep metadata locally and fetch session objects when requested.
 
-Use `agents archive update` to ingest local changes.
+Use `agents archive advanced ingest` to ingest local changes.
 Use `agents archive sync` to ingest, commit, and push changes.
 Use `agents archive show` to fetch one session object.
 Use `agents archive cache clear` to remove downloaded session objects.
@@ -84,15 +84,16 @@ pub enum ArchiveCommand {
         #[arg(long)]
         full: bool,
     },
-    /// Show archive and pending-source counts.
-    Status,
-    /// Ingest new and changed local history.
-    Update {
-        /// Report pending sources without writing anything.
+    /// Show local and remote archive status.
+    Status {
+        /// Do not fetch remote state.
         #[arg(long)]
-        dry_run: bool,
+        offline: bool,
+        /// Show filesystem paths and more detail.
+        #[arg(long)]
+        verbose: bool,
     },
-    /// Pull, ingest, commit, rebase, and push the archive.
+    /// Fetch, preserve local work, rebase, ingest, and push the archive.
     Sync {
         #[arg(short = 'm', long, default_value = "Update chat archive")]
         message: String,
@@ -105,29 +106,46 @@ pub enum ArchiveCommand {
     },
     /// Print one session and fetch its object when needed.
     Show { id: String },
-    /// Fetch and cache one session object.
-    Fetch { id: String },
-    /// Fetch and cache every session object.
-    Hydrate,
     /// Manage locally cached session data.
     Cache {
         #[command(subcommand)]
         command: ArchiveCacheCommand,
     },
-    /// Rebuild the local full-text index.
-    Reindex,
-    /// Verify references and locally available objects.
-    Verify {
-        /// Fetch and verify every referenced object.
-        #[arg(long)]
-        full: bool,
+    /// Run individual operations normally handled by sync.
+    Advanced {
+        #[command(subcommand)]
+        command: ArchiveAdvancedCommand,
     },
 }
 
 #[derive(Debug, Subcommand)]
 pub enum ArchiveCacheCommand {
+    /// Fetch and cache one session object.
+    Fetch { id: String },
+    /// Fetch and cache every session object.
+    Hydrate,
     /// Return the local archive to a thin-clone state.
     Clear,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ArchiveAdvancedCommand {
+    /// Fetch and rebase archive metadata without ingesting or pushing.
+    Pull,
+    /// Ingest new and changed local history.
+    Ingest {
+        /// Report pending sources without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Rebuild the local search index.
+    Reindex,
+    /// Verify references and available objects.
+    Verify {
+        /// Fetch and verify every referenced object.
+        #[arg(long)]
+        full: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -169,24 +187,26 @@ pub fn run(paths: &Paths, command: ArchiveCommand) -> Result<()> {
             machine,
             full,
         } => init(paths, path, remote.as_deref(), machine, full),
-        ArchiveCommand::Status => status(paths),
-        ArchiveCommand::Update { dry_run } => {
-            let config = ArchiveConfig::load(paths)?;
-            let stats = store::update(paths, &config, dry_run)?;
-            print_update(&stats, dry_run);
-            Ok(())
-        }
+        ArchiveCommand::Status { offline, verbose } => status(paths, offline, verbose),
         ArchiveCommand::Sync { message } => sync_archive(paths, &message),
-        ArchiveCommand::Search { query, limit } => store::search(paths, &query, limit),
+        ArchiveCommand::Search { query, limit } => {
+            let config = ArchiveConfig::load(paths)?;
+            store::ensure_repository(&config.repo_path)?;
+            store::search(paths, &query, limit)
+        }
         ArchiveCommand::Show { id } => {
             let config = ArchiveConfig::load(paths)?;
             store::show(paths, &config, &id)
         }
-        ArchiveCommand::Fetch { id } => {
+        ArchiveCommand::Cache {
+            command: ArchiveCacheCommand::Fetch { id },
+        } => {
             let config = ArchiveConfig::load(paths)?;
             store::fetch(paths, &config, &id)
         }
-        ArchiveCommand::Hydrate => {
+        ArchiveCommand::Cache {
+            command: ArchiveCacheCommand::Hydrate,
+        } => {
             let config = ArchiveConfig::load(paths)?;
             let fetched = store::hydrate(paths, &config)?;
             println!("Fetched session objects: {fetched}.");
@@ -195,14 +215,38 @@ pub fn run(paths: &Paths, command: ArchiveCommand) -> Result<()> {
         ArchiveCommand::Cache {
             command: ArchiveCacheCommand::Clear,
         } => clear_cache(paths),
-        ArchiveCommand::Reindex => {
-            let config = ArchiveConfig::load(paths)?;
+        ArchiveCommand::Advanced { command } => run_advanced(paths, command),
+    }
+}
+
+fn run_advanced(paths: &Paths, command: ArchiveAdvancedCommand) -> Result<()> {
+    let config = ArchiveConfig::load(paths)?;
+    store::ensure_repository(&config.repo_path)?;
+    match command {
+        ArchiveAdvancedCommand::Pull => {
+            if git_dirty(&config.repo_path)? {
+                bail!("archive has local changes; run agents archive sync to preserve them");
+            }
+            if !has_origin(&config.repo_path) {
+                bail!("archive has no origin remote");
+            }
+            fetch_remote(&config.repo_path, "Fetching archive metadata")?;
+            rebase_remote(&config.repo_path)?;
+            store::rebuild_index(paths, &config)?;
+            println!("Archive metadata pulled and indexed.");
+            Ok(())
+        }
+        ArchiveAdvancedCommand::Ingest { dry_run } => {
+            let stats = store::update(paths, &config, dry_run)?;
+            print_update(&stats, dry_run);
+            Ok(())
+        }
+        ArchiveAdvancedCommand::Reindex => {
             store::rebuild_index(paths, &config)?;
             println!("Rebuilt the unified search index.");
             Ok(())
         }
-        ArchiveCommand::Verify { full } => {
-            let config = ArchiveConfig::load(paths)?;
+        ArchiveAdvancedCommand::Verify { full } => {
             let result = store::verify(paths, &config, full)?;
             println!("Available objects verified: {}.", result.objects);
             println!("References verified: {}.", result.references);
@@ -411,27 +455,80 @@ fn init(
     println!("Archive repository: {}", config.repo_path.display());
     println!("Machine: {} ({})", config.machine_name, config.machine_id);
     println!("Storage: {}", if config.thin { "thin" } else { "full" });
-    println!("Run: agents archive update");
+    println!("Run: agents archive sync");
     Ok(())
 }
 
-fn status(paths: &Paths) -> Result<()> {
+fn status(paths: &Paths, offline: bool, verbose: bool) -> Result<()> {
+    let config_path = paths.config_dir.join("archive.toml");
+    if !config_path.is_file() {
+        println!("Archive: not configured");
+        println!("Run: agents archive init");
+        if verbose {
+            println!("Expected config: {}", config_path.display());
+        }
+        return Ok(());
+    }
     let config = ArchiveConfig::load(paths)?;
     store::ensure_repository(&config.repo_path)?;
-    let pending = store::update(paths, &config, true)?;
-    let (objects, referenced_objects, references, sessions, messages) =
-        store::counts(paths, &config)?;
+    let remote_state = if offline {
+        "offline".to_owned()
+    } else if !has_origin(&config.repo_path) {
+        "no origin".to_owned()
+    } else {
+        match fetch_remote(&config.repo_path, "Checking archive remote") {
+            Ok(()) => "current remote state fetched".to_owned(),
+            Err(error) => {
+                eprintln!("warning: could not fetch archive: {error:#}");
+                "cached remote state".to_owned()
+            }
+        }
+    };
+    let pending = store::inspect(paths, &config)?;
+    let (objects, referenced_objects, references, sessions, _) = store::counts(paths, &config)?;
     println!("Archive: {}", config.repo_path.display());
     println!("Machine: {} ({})", config.machine_name, config.machine_id);
-    println!("Storage: {}", if config.thin { "thin" } else { "full" });
-    println!("Available objects: {objects} of {referenced_objects}");
-    println!("References: {references}");
-    println!("Indexed sessions: {sessions}");
-    println!("Indexed text events: {messages}");
+    println!("Local");
+    println!("  Storage: {}", if config.thin { "thin" } else { "full" });
     println!(
-        "Changed sources: {} of {}",
+        "  Working tree: {}",
+        if git_dirty(&config.repo_path)? {
+            "changed"
+        } else {
+            "clean"
+        }
+    );
+    let (ahead, behind) = archive_upstream(&config.repo_path)
+        .and_then(|upstream| ahead_behind(&config.repo_path, &upstream).ok())
+        .unwrap_or((0, 0));
+    println!("  Commits: {ahead} ahead, {behind} behind");
+    println!("  Session content cached: {objects} of {referenced_objects}");
+    println!("  Metadata references: {references}");
+    println!("  Searchable metadata sessions: {sessions}");
+    println!(
+        "  Changed history sources: {} of {}",
         pending.changed, pending.discovered
     );
+    println!("Remote");
+    println!(
+        "  Origin: {}",
+        git_text(&config.repo_path, ["remote", "get-url", "origin"])
+            .unwrap_or_else(|_| "not configured".to_owned())
+    );
+    println!("  State: {remote_state}");
+    if verbose {
+        println!("Paths");
+        println!("  Repository: {}", config.repo_path.display());
+        println!("  Config: {}", config_path.display());
+        println!(
+            "  Index: {}",
+            paths.state_dir.join("chat-archive.sqlite").display()
+        );
+        println!(
+            "  Object cache: {}",
+            paths.state_dir.join("chat-archive-objects").display()
+        );
+    }
     Ok(())
 }
 
@@ -465,7 +562,8 @@ fn sync_archive(paths: &Paths, message: &str) -> Result<()> {
     store::ensure_repository(&config.repo_path)?;
     commit_archive_changes(&config, message)?;
     if has_origin(&config.repo_path) && remote_has_head(&config.repo_path) {
-        pull_remote(&config.repo_path)?;
+        fetch_remote(&config.repo_path, "Fetching archive metadata")?;
+        rebase_remote(&config.repo_path)?;
     }
     let stats = store::update(paths, &config, false)?;
     print_update(&stats, false);
@@ -529,8 +627,38 @@ fn remote_has_head(repo: &std::path::Path) -> bool {
         .is_ok_and(|output| output.status.success() && !output.stdout.is_empty())
 }
 
-fn pull_remote(repo: &std::path::Path) -> Result<()> {
-    util::command_status("git", ["pull", "--rebase", "origin", "HEAD"], Some(repo))
+fn fetch_remote(repo: &std::path::Path, message: &str) -> Result<()> {
+    let activity = Activity::delayed(message, Duration::from_millis(300));
+    let output = Command::new("git")
+        .args(["fetch", "--prune", "origin"])
+        .current_dir(repo)
+        .output()?;
+    if !output.status.success() {
+        bail!(
+            "git fetch failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+    }
+    activity.finish("Archive remote state fetched");
+    Ok(())
+}
+
+fn rebase_remote(repo: &std::path::Path) -> Result<()> {
+    let Some(upstream) = archive_upstream(repo) else {
+        return Ok(());
+    };
+    let status = Command::new("git")
+        .args(["rebase", &upstream])
+        .current_dir(repo)
+        .status()?;
+    if status.success() {
+        return Ok(());
+    }
+    let _ = Command::new("git")
+        .args(["rebase", "--abort"])
+        .current_dir(repo)
+        .status();
+    bail!("archive rebase conflicted; local commits remain unchanged")
 }
 
 fn push_with_retry(repo: &std::path::Path) -> Result<()> {
@@ -545,9 +673,32 @@ fn push_with_retry(repo: &std::path::Path) -> Result<()> {
         if attempt == 3 {
             bail!("archive push failed after three attempts");
         }
-        pull_remote(repo)?;
+        fetch_remote(repo, "Refreshing archive before retry")?;
+        rebase_remote(repo)?;
     }
     unreachable!()
+}
+
+fn archive_upstream(repo: &std::path::Path) -> Option<String> {
+    git_text(
+        repo,
+        [
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    )
+    .ok()
+}
+
+fn ahead_behind(repo: &std::path::Path, upstream: &str) -> Result<(usize, usize)> {
+    let range = format!("HEAD...{upstream}");
+    let text = git_text(repo, ["rev-list", "--left-right", "--count", &range])?;
+    let mut fields = text.split_whitespace();
+    let ahead = fields.next().context("missing ahead count")?.parse()?;
+    let behind = fields.next().context("missing behind count")?.parse()?;
+    Ok((ahead, behind))
 }
 
 fn git_dirty(repo: &std::path::Path) -> Result<bool> {

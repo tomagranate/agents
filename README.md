@@ -45,13 +45,16 @@ Use a private Git repository at `~/.agents` for personal rules and shared skills
 
 ```text
 ~/.agents/
-  AGENTS.md
-  harness/
-    claude.md
-    codex.md
-    grok.md
-    opencode.md
-  skills/<name>/SKILL.md
+  shared/
+    AGENTS.md
+    skills/<name>/SKILL.md
+  harnesses/
+    claude/
+      AGENTS.md
+      skills/<name>/SKILL.md
+    codex/
+    grok/
+    opencode/
 ```
 
 Common commands:
@@ -61,12 +64,24 @@ agents status
 agents init
 agents sync
 agents skills
+agents skills codex
 agents md
-agents pull
-agents push -m "Update shared rules"
+agents md codex
 ```
 
-`agents sync` wires shared rules into each installed harness.
+`agents status` and `agents archive status` fetch current remote state. Use `--offline` to use cached Git state. Use `--verbose` to show local paths.
+
+`agents sync` fetches remote content, preserves local changes, rebases, applies the effective content, and pushes it.
+
+Shared content applies to every harness. Harness content applies only to its named harness. A harness-specific skill replaces a shared skill with the same name.
+
+Individual operations are available under `agents home advanced`:
+
+```sh
+agents home advanced pull
+agents home advanced apply
+agents home advanced push
+```
 
 ## Chat archive
 
@@ -97,13 +112,12 @@ agents archive init \
   --remote git@github.com:OWNER/chat-archive.git
 ```
 
-Ingest local history:
+Synchronize local history:
 
 ```sh
-agents archive update
+agents archive sync
 agents archive status
 agents archive search "liquid glass"
-agents archive verify
 ```
 
 Metadata search covers every archived session. Message search covers locally available sessions.
@@ -112,7 +126,7 @@ Metadata search covers every archived session. Message search covers locally ava
 
 ```sh
 agents archive show <session-id>
-agents archive fetch <session-id>
+agents archive cache fetch <session-id>
 ```
 
 Remove downloaded sessions and restore the thin clone:
@@ -126,14 +140,17 @@ The command keeps archive metadata and the local search index. It refuses uncomm
 Download and index every session when full-text search needs the complete archive:
 
 ```sh
-agents archive hydrate
-agents archive verify --full
+agents archive cache hydrate
+agents archive advanced verify --full
 ```
 
-Pull, ingest, commit, and push in one operation:
+Individual archive operations are available under `advanced`:
 
 ```sh
-agents archive sync
+agents archive advanced pull
+agents archive advanced ingest
+agents archive advanced reindex
+agents archive advanced verify
 ```
 
 ### Archive layout
@@ -198,6 +215,8 @@ Use either command:
 agents update
 agents upgrade
 ```
+
+Primer can run the hidden shell update check at startup. It reads cached state immediately and refreshes stale state in a detached process. The check reports CLI, agents-home, and archive updates without delaying the shell.
 
 For Homebrew installations, the command uses `brew upgrade agents`.
 

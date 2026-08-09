@@ -4,6 +4,7 @@ use std::{
     io::{BufRead, BufReader, Cursor},
     path::{Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
@@ -55,7 +56,20 @@ pub struct UpdateStats {
 }
 
 pub fn update(paths: &Paths, config: &ArchiveConfig, dry_run: bool) -> Result<UpdateStats> {
-    let activity = Activity::new("Scanning local chat history");
+    update_with_delay(paths, config, dry_run, Duration::ZERO)
+}
+
+pub fn inspect(paths: &Paths, config: &ArchiveConfig) -> Result<UpdateStats> {
+    update_with_delay(paths, config, true, Duration::from_millis(300))
+}
+
+fn update_with_delay(
+    paths: &Paths,
+    config: &ArchiveConfig,
+    dry_run: bool,
+    delay: Duration,
+) -> Result<UpdateStats> {
+    let activity = Activity::delayed("Scanning local chat history", delay);
     let _lock = ArchiveLock::acquire(paths)?;
     ensure_repository(&config.repo_path)?;
     let mut connection = state_connection(paths)?;

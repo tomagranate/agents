@@ -1,4 +1,9 @@
-use std::{fs, path::Path, process::Command as StdCommand};
+use std::{
+    fs,
+    path::Path,
+    process::Command as StdCommand,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -38,19 +43,61 @@ fn write_jsonl(path: &Path, rows: &[serde_json::Value]) {
 }
 
 #[test]
-fn preserves_legacy_commands_and_embedded_templates() {
+fn supports_scoped_content_and_public_commands() {
     let temporary = TempDir::new().unwrap();
     agents(temporary.path())
-        .args(["init", "--no-sync"])
+        .args(["init", "--no-apply"])
         .assert()
         .success()
         .stdout(predicate::str::contains("embedded templates"));
-    assert!(temporary.path().join(".agents/AGENTS.md").is_file());
+    assert!(temporary.path().join(".agents/shared/AGENTS.md").is_file());
+    assert!(
+        temporary
+            .path()
+            .join(".agents/harnesses/codex/AGENTS.md")
+            .is_file()
+    );
+    fs::create_dir_all(
+        temporary
+            .path()
+            .join(".agents/harnesses/codex/skills/codex-only"),
+    )
+    .unwrap();
+    fs::create_dir_all(temporary.path().join(".agents/shared/skills/codex-only")).unwrap();
+    fs::write(
+        temporary
+            .path()
+            .join(".agents/shared/skills/codex-only/SKILL.md"),
+        "# Shared version\n",
+    )
+    .unwrap();
+    fs::write(
+        temporary
+            .path()
+            .join(".agents/harnesses/codex/skills/codex-only/SKILL.md"),
+        "# Codex only\n",
+    )
+    .unwrap();
     agents(temporary.path()).arg("sync").assert().success();
     assert!(temporary.path().join(".claude/CLAUDE.md").is_file());
     assert!(temporary.path().join(".codex/AGENTS.md").is_file());
+    assert_eq!(
+        fs::read_link(temporary.path().join(".codex/skills/codex-only")).unwrap(),
+        temporary
+            .path()
+            .join(".agents/harnesses/codex/skills/codex-only")
+    );
+    assert_eq!(
+        fs::read_link(temporary.path().join(".claude/skills/codex-only")).unwrap(),
+        temporary.path().join(".agents/shared/skills/codex-only")
+    );
     agents(temporary.path()).arg("status").assert().success();
-    agents(temporary.path()).arg("skills").assert().success();
+    agents(temporary.path())
+        .args(["skills", "codex"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("codex-only"))
+        .stdout(predicate::str::contains("harness"));
     agents(temporary.path())
         .args(["md", "codex"])
         .assert()
@@ -60,6 +107,142 @@ fn preserves_legacy_commands_and_embedded_templates() {
         .args(["upgrade", "--help"])
         .assert()
         .success();
+}
+
+#[test]
+fn commands_are_safe_before_initialization() {
+    let temporary = TempDir::new().unwrap();
+    let home = temporary.path();
+    agents(home)
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Agents home: not configured"));
+    agents(home)
+        .args(["archive", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Archive: not configured"));
+    agents(home)
+        .arg("sync")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("agents home is not configured"));
+    agents(home)
+        .args(["archive", "search", "anything"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("archive is not configured"));
+    agents(home)
+        .arg("skills")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Agents home: not initialized"));
+    assert!(!home.join(".state/agents/chat-archive.sqlite").exists());
+    assert!(!home.join(".agents").exists());
+}
+
+#[test]
+fn shell_check_uses_cached_state_without_waiting_for_network() {
+    let temporary = TempDir::new().unwrap();
+    let state = temporary.path().join(".state/agents");
+    fs::create_dir_all(&state).unwrap();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    fs::write(
+        state.join("update-check.json"),
+        serde_json::to_vec(&json!({
+            "checked_at": now,
+            "latest_cli": "9.0.0",
+            "agents_home_behind": 1,
+            "archive_behind": 2
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    agents(temporary.path())
+        .arg("_shell-check")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("CLI 9.0.0 is available"))
+        .stderr(predicate::str::contains("agents-home has remote changes"))
+        .stderr(predicate::str::contains("chat archive has remote changes"));
+}
+
+#[test]
+fn home_sync_rebases_local_content_and_pushes_it() {
+    let temporary = TempDir::new().unwrap();
+    let remote = temporary.path().join("agents-home.git");
+    assert!(
+        StdCommand::new("git")
+            .args(["init", "--bare", "-b", "main"])
+            .arg(&remote)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let machine_a = temporary.path().join("home-a");
+    let machine_b = temporary.path().join("home-b");
+    fs::create_dir_all(&machine_a).unwrap();
+    fs::create_dir_all(&machine_b).unwrap();
+
+    agents(&machine_a)
+        .args(["init", "--no-apply"])
+        .assert()
+        .success();
+    assert!(
+        StdCommand::new("git")
+            .args(["remote", "add", "origin"])
+            .arg(&remote)
+            .current_dir(machine_a.join(".agents"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    agents(&machine_a).arg("sync").assert().success();
+    assert!(
+        StdCommand::new("git")
+            .arg("clone")
+            .arg(&remote)
+            .arg(machine_b.join(".agents"))
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    fs::write(
+        machine_a.join(".agents/shared/AGENTS.md"),
+        "# Shared from A\n",
+    )
+    .unwrap();
+    agents(&machine_a).arg("sync").assert().success();
+    fs::write(
+        machine_b.join(".agents/harnesses/codex/AGENTS.md"),
+        "# Codex from B\n",
+    )
+    .unwrap();
+    agents(&machine_b).arg("sync").assert().success();
+
+    let verification = temporary.path().join("verification");
+    assert!(
+        StdCommand::new("git")
+            .arg("clone")
+            .arg(&remote)
+            .arg(&verification)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(
+        fs::read_to_string(verification.join("shared/AGENTS.md")).unwrap(),
+        "# Shared from A\n"
+    );
+    assert_eq!(
+        fs::read_to_string(verification.join("harnesses/codex/AGENTS.md")).unwrap(),
+        "# Codex from B\n"
+    );
 }
 
 #[test]
@@ -126,7 +309,7 @@ fn archives_all_four_sources_incrementally() {
     create_opencode(&home.join(".local/share/opencode/opencode.db"));
 
     agents(home)
-        .args(["archive", "update"])
+        .args(["archive", "advanced", "ingest"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Normalized 4 sessions"))
@@ -135,7 +318,7 @@ fn archives_all_four_sources_incrementally() {
         .stderr(predicate::str::contains("Archive update complete"))
         .stderr(predicate::str::contains("\x1b").not());
     agents(home)
-        .args(["archive", "verify"])
+        .args(["archive", "advanced", "verify"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Available objects verified: 4"))
@@ -146,7 +329,7 @@ fn archives_all_four_sources_incrementally() {
         .success()
         .stdout(predicate::str::contains("codex alpha question"));
     agents(home)
-        .args(["archive", "update"])
+        .args(["archive", "advanced", "ingest"])
         .assert()
         .success()
         .stdout(predicate::str::contains("0 changed"));
@@ -233,7 +416,7 @@ fn syncs_machine_owned_refs_through_one_remote() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Storage: thin"))
-        .stdout(predicate::str::contains("Available objects: 0 of 1"));
+        .stdout(predicate::str::contains("Session content cached: 0 of 1"));
     let remote_reference = WalkDir::new(machine_b.join("archive/refs"))
         .into_iter()
         .filter_map(Result::ok)
@@ -276,7 +459,7 @@ fn syncs_machine_owned_refs_through_one_remote() {
         &[json!({"type":"user","content":[{"type":"text","text":"from machine b"}]})],
     );
     agents(&machine_b)
-        .args(["archive", "update"])
+        .args(["archive", "advanced", "ingest"])
         .assert()
         .success();
     agents(&machine_b)
@@ -342,9 +525,9 @@ fn syncs_machine_owned_refs_through_one_remote() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Storage: thin"))
-        .stdout(predicate::str::contains("Available objects: 0 of 2"));
+        .stdout(predicate::str::contains("Session content cached: 0 of 2"));
     agents(&machine_b)
-        .args(["archive", "verify"])
+        .args(["archive", "advanced", "verify"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Available objects verified: 0"))
@@ -364,14 +547,14 @@ fn syncs_machine_owned_refs_through_one_remote() {
         .assert()
         .success();
     agents(&machine_a)
-        .args(["archive", "verify"])
+        .args(["archive", "advanced", "verify"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Available objects verified: 1"))
         .stdout(predicate::str::contains("References verified: 2"))
         .stdout(predicate::str::contains("Remote objects: 1"));
     agents(&machine_a)
-        .args(["archive", "hydrate"])
+        .args(["archive", "cache", "hydrate"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Fetched session objects: 1"));
@@ -381,7 +564,7 @@ fn syncs_machine_owned_refs_through_one_remote() {
         .success()
         .stdout(predicate::str::contains("from [machine] [b]"));
     agents(&machine_a)
-        .args(["archive", "verify"])
+        .args(["archive", "advanced", "verify"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Available objects verified: 2"))

@@ -1,6 +1,7 @@
 mod archive;
+mod background;
 mod config;
-mod legacy;
+mod home;
 mod progress;
 mod updater;
 mod util;
@@ -21,37 +22,36 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Show the configuration status.
-    #[command(alias = "st")]
-    Status,
+    /// Show local and remote configuration status.
+    Status {
+        /// Do not fetch remote state.
+        #[arg(long)]
+        offline: bool,
+        /// Show filesystem paths and more detail.
+        #[arg(long)]
+        verbose: bool,
+    },
     /// Scaffold the shared configuration.
     Init {
         #[arg(long)]
         force: bool,
         #[arg(long)]
-        no_sync: bool,
+        no_apply: bool,
     },
-    /// Pull agents-home and wire all harnesses.
-    Pull {
-        #[arg(long)]
-        no_sync: bool,
-    },
-    /// Commit and push agents-home.
-    Push {
+    /// Reconcile, apply, commit, and push agents-home.
+    Sync {
         #[arg(short = 'm', long)]
         message: Option<String>,
     },
-    /// Show the shared skill matrix.
-    #[command(alias = "sk")]
-    Skills,
-    /// Print resolved AGENTS text.
-    #[command(alias = "agents-md")]
+    /// Show shared and harness-specific skills.
+    Skills { harness: Option<String> },
+    /// Print effective shared and harness-specific instructions.
     Md { harness: Option<String> },
-    /// Wire rules and shared skills into each harness.
-    Sync,
-    /// Print important filesystem paths.
-    #[command(alias = "path")]
-    Paths,
+    /// Run individual agents-home operations.
+    Home {
+        #[command(subcommand)]
+        command: HomeCommand,
+    },
     /// Print the installed version.
     Version,
     /// Manage the unified chat archive.
@@ -60,8 +60,33 @@ enum Command {
         command: archive::ArchiveCommand,
     },
     /// Update this command to the newest release.
-    #[command(alias = "upgrade")]
+    #[command(visible_alias = "upgrade")]
     Update(updater::UpdateArgs),
+    /// Read cached update state and start a background refresh.
+    #[command(name = "_shell-check", hide = true)]
+    ShellCheck,
+    /// Refresh cached update state.
+    #[command(name = "_refresh-updates", hide = true)]
+    RefreshUpdates,
+}
+
+#[derive(Subcommand)]
+enum HomeCommand {
+    /// Run individual operations normally handled by sync.
+    Advanced {
+        #[command(subcommand)]
+        command: HomeAdvancedCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum HomeAdvancedCommand {
+    /// Fetch and rebase agents-home without applying or pushing.
+    Pull,
+    /// Push existing agents-home commits.
+    Push,
+    /// Apply current content to installed harnesses.
+    Apply,
 }
 
 fn main() {
@@ -74,20 +99,31 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     let paths = config::Paths::discover()?;
-    match cli.command.unwrap_or(Command::Status) {
-        Command::Status => legacy::status(&paths),
-        Command::Init { force, no_sync } => legacy::init(&paths, force, !no_sync),
-        Command::Pull { no_sync } => legacy::pull(&paths, !no_sync),
-        Command::Push { message } => legacy::push(&paths, message.as_deref()),
-        Command::Skills => legacy::skills(&paths),
-        Command::Md { harness } => legacy::md(&paths, harness.as_deref()),
-        Command::Sync => legacy::sync(&paths),
-        Command::Paths => legacy::print_paths(&paths),
+    match cli.command.unwrap_or(Command::Status {
+        offline: false,
+        verbose: false,
+    }) {
+        Command::Status { offline, verbose } => home::status(&paths, offline, verbose),
+        Command::Init { force, no_apply } => home::init(&paths, force, !no_apply),
+        Command::Sync { message } => {
+            home::sync(&paths, message.as_deref().unwrap_or("Update agents home"))
+        }
+        Command::Skills { harness } => home::skills(&paths, harness.as_deref()),
+        Command::Md { harness } => home::md(&paths, harness.as_deref()),
+        Command::Home {
+            command: HomeCommand::Advanced { command },
+        } => match command {
+            HomeAdvancedCommand::Pull => home::pull(&paths),
+            HomeAdvancedCommand::Push => home::push(&paths),
+            HomeAdvancedCommand::Apply => home::apply(&paths),
+        },
         Command::Version => {
             println!("agents {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
         Command::Archive { command } => archive::run(&paths, command),
         Command::Update(args) => updater::run(args),
+        Command::ShellCheck => background::shell_check(&paths),
+        Command::RefreshUpdates => background::refresh(&paths),
     }
 }

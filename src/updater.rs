@@ -89,6 +89,12 @@ fn fetch_release(version: Option<&str>) -> Result<Release> {
         .context("could not read the GitHub release")
 }
 
+pub(crate) fn latest_version() -> Result<Version> {
+    let release = fetch_release(None)?;
+    Version::parse(release.tag_name.trim_start_matches('v'))
+        .with_context(|| format!("invalid release version {}", release.tag_name))
+}
+
 fn is_homebrew_install(executable: &Path) -> bool {
     let Ok(output) = util::command_output("brew", ["--prefix", "agents"], None) else {
         return false;
