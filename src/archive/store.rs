@@ -18,7 +18,7 @@ use super::{
     ArchiveConfig, adapters,
     model::{ArchiveRef, Artifact, ParsedArtifact, Session},
 };
-use crate::{config::Paths, util};
+use crate::{config::Paths, progress::Activity, util};
 
 pub struct ArchiveLock(File);
 
@@ -55,10 +55,12 @@ pub struct UpdateStats {
 }
 
 pub fn update(paths: &Paths, config: &ArchiveConfig, dry_run: bool) -> Result<UpdateStats> {
+    let activity = Activity::new("Scanning local chat history");
     let _lock = ArchiveLock::acquire(paths)?;
     ensure_repository(&config.repo_path)?;
     let mut connection = state_connection(paths)?;
     let artifacts = adapters::discover(paths)?;
+    activity.set_message(format!("Checking {} discovered sources", artifacts.len()));
     let changed: Vec<_> = artifacts
         .iter()
         .filter(|artifact| {
@@ -72,11 +74,14 @@ pub fn update(paths: &Paths, config: &ArchiveConfig, dry_run: bool) -> Result<Up
         ..UpdateStats::default()
     };
     if dry_run {
+        activity.finish("Source scan complete");
         return Ok(stats);
     }
     if changed.is_empty() {
+        activity.finish("Archive is current");
         return Ok(stats);
     }
+    activity.set_message(format!("Normalizing {} changed sources", changed.len()));
     let parsed_results: Vec<Result<ParsedArtifact>> = changed
         .into_par_iter()
         .map(|artifact| adapters::parse(paths, artifact))
@@ -104,6 +109,7 @@ pub fn update(paths: &Paths, config: &ArchiveConfig, dry_run: bool) -> Result<Up
         .values()
         .map(|(_, session)| session.events.len())
         .sum();
+    activity.set_message(format!("Writing {} normalized sessions", selected.len()));
     let writes: Vec<Result<bool>> = selected
         .into_values()
         .collect::<Vec<_>>()
@@ -125,7 +131,9 @@ pub fn update(paths: &Paths, config: &ArchiveConfig, dry_run: bool) -> Result<Up
         stats.objects_written += usize::from(write?);
         stats.refs_written += 1;
     }
+    activity.set_message("Pruning superseded session objects");
     stats.objects_pruned = prune_unreferenced_objects(paths, config)?;
+    activity.set_message("Saving source fingerprints");
     let transaction = connection.transaction()?;
     for parsed in parsed {
         transaction.execute(
@@ -140,7 +148,8 @@ pub fn update(paths: &Paths, config: &ArchiveConfig, dry_run: bool) -> Result<Up
         )?;
     }
     transaction.commit()?;
-    rebuild_index(paths, config)?;
+    rebuild_index_with_activity(paths, config, &activity)?;
+    activity.finish("Archive update complete");
     Ok(stats)
 }
 
@@ -250,8 +259,24 @@ fn write_ref(
 }
 
 pub fn rebuild_index(paths: &Paths, config: &ArchiveConfig) -> Result<()> {
+    let activity = Activity::new("Rebuilding the archive index");
+    rebuild_index_with_activity(paths, config, &activity)?;
+    activity.finish("Archive index rebuilt");
+    Ok(())
+}
+
+fn rebuild_index_with_activity(
+    paths: &Paths,
+    config: &ArchiveConfig,
+    activity: &Activity,
+) -> Result<()> {
     let mut selected: HashMap<String, ArchiveRef> = HashMap::new();
-    for reference_path in ref_paths(&config.repo_path) {
+    let reference_paths = ref_paths(&config.repo_path);
+    activity.set_message(format!(
+        "Reading {} archive references",
+        reference_paths.len()
+    ));
+    for reference_path in reference_paths {
         let Ok(contents) = fs::read(&reference_path) else {
             continue;
         };
@@ -265,6 +290,7 @@ pub fn rebuild_index(paths: &Paths, config: &ArchiveConfig) -> Result<()> {
             selected.insert(reference.logical_id.clone(), reference);
         }
     }
+    activity.set_message(format!("Indexing {} sessions", selected.len()));
     let mut connection = state_connection(paths)?;
     let transaction = connection.transaction()?;
     transaction.execute_batch(
@@ -544,15 +570,27 @@ pub struct VerifyResult {
 }
 
 pub fn verify(paths: &Paths, config: &ArchiveConfig, full: bool) -> Result<VerifyResult> {
+    let activity = Activity::new("Reading archive references");
     let mut hashes = HashSet::new();
     let mut references = 0;
-    for path in ref_paths(&config.repo_path) {
+    let reference_paths = ref_paths(&config.repo_path);
+    activity.set_message(format!(
+        "Checking {} archive references",
+        reference_paths.len()
+    ));
+    for path in reference_paths {
         let reference: ArchiveRef = serde_json::from_slice(&fs::read(&path)?)?;
         object_relative_path(&reference.object_sha256)
             .with_context(|| format!("invalid reference {}", path.display()))?;
         hashes.insert(reference.object_sha256);
         references += 1;
     }
+    let verb = if full {
+        "Fetching and verifying"
+    } else {
+        "Verifying available"
+    };
+    activity.set_message(format!("{verb} {} session objects", hashes.len()));
     let mut objects = 0;
     let mut remote = 0;
     for hash in hashes {
@@ -561,6 +599,7 @@ pub fn verify(paths: &Paths, config: &ArchiveConfig, full: bool) -> Result<Verif
             None => remote += 1,
         }
     }
+    activity.finish("Archive verification complete");
     Ok(VerifyResult {
         objects,
         references,
@@ -659,8 +698,12 @@ pub fn search(paths: &Paths, query: &str, limit: usize) -> Result<()> {
 pub fn show(paths: &Paths, config: &ArchiveConfig, id: &str) -> Result<()> {
     let (logical_id, hash) = resolve_session(paths, id)?;
     let was_available = object_is_available(paths, config, &hash);
+    let activity = (!was_available).then(|| Activity::new("Fetching the session object"));
     let session =
         read_object(paths, config, &hash, true)?.context("session object is unavailable")?;
+    if let Some(activity) = activity {
+        activity.finish("Session object fetched");
+    }
     if !was_available {
         rebuild_index(paths, config)?;
     }
@@ -671,7 +714,11 @@ pub fn show(paths: &Paths, config: &ArchiveConfig, id: &str) -> Result<()> {
 pub fn fetch(paths: &Paths, config: &ArchiveConfig, id: &str) -> Result<()> {
     let (logical_id, hash) = resolve_session(paths, id)?;
     let was_available = object_is_available(paths, config, &hash);
+    let activity = (!was_available).then(|| Activity::new("Fetching the session object"));
     read_object(paths, config, &hash, true)?.context("session object is unavailable")?;
+    if let Some(activity) = activity {
+        activity.finish("Session object fetched");
+    }
     if !was_available {
         rebuild_index(paths, config)?;
         println!("Fetched session {logical_id}.");
@@ -682,12 +729,14 @@ pub fn fetch(paths: &Paths, config: &ArchiveConfig, id: &str) -> Result<()> {
 }
 
 pub fn hydrate(paths: &Paths, config: &ArchiveConfig) -> Result<usize> {
+    let activity = Activity::new("Reading archive references");
     let hashes: HashSet<String> = ref_paths(&config.repo_path)
         .into_iter()
         .filter_map(|path| fs::read(path).ok())
         .filter_map(|contents| serde_json::from_slice::<ArchiveRef>(&contents).ok())
         .map(|reference| reference.object_sha256)
         .collect();
+    activity.set_message(format!("Fetching {} session objects", hashes.len()));
     let mut fetched = 0;
     for hash in hashes {
         if !object_is_available(paths, config, &hash) {
@@ -695,7 +744,8 @@ pub fn hydrate(paths: &Paths, config: &ArchiveConfig) -> Result<usize> {
             fetched += 1;
         }
     }
-    rebuild_index(paths, config)?;
+    rebuild_index_with_activity(paths, config, &activity)?;
+    activity.finish("Archive hydration complete");
     Ok(fetched)
 }
 

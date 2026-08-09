@@ -1,6 +1,7 @@
 mod archive;
 mod config;
 mod legacy;
+mod progress;
 mod updater;
 mod util;
 

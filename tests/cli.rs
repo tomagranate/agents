@@ -129,7 +129,11 @@ fn archives_all_four_sources_incrementally() {
         .args(["archive", "update"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Normalized 4 sessions"));
+        .stdout(predicate::str::contains("Normalized 4 sessions"))
+        .stderr(predicate::str::contains("Scanning local chat history"))
+        .stderr(predicate::str::contains("Normalizing 4 changed sources"))
+        .stderr(predicate::str::contains("Archive update complete"))
+        .stderr(predicate::str::contains("\x1b").not());
     agents(home)
         .args(["archive", "verify"])
         .assert()
