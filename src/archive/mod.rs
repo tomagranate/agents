@@ -40,9 +40,11 @@ const SESSION_SCHEMA: &str = r#"{
     "type": {"const": "session"},
     "schema_version": {"const": 1},
     "logical_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-    "source": {"enum": ["codex", "claude", "opencode", "grok"]},
+    "source": {"enum": ["codex", "claude", "opencode", "grok", "chatgpt", "claude-web", "t3chat"]},
     "native_id": {"type": "string"},
     "title": {"type": "string"},
+    "parent_session_id": {"type": "string"},
+    "parent_event_id": {"type": "string"},
     "models": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
   }
 }
@@ -58,6 +60,9 @@ const EVENT_SCHEMA: &str = r#"{
     "type": {"const": "event"},
     "sequence": {"type": "integer", "minimum": 0},
     "kind": {"enum": ["message", "summary", "memory", "tool"]},
+    "native_id": {"type": "string"},
+    "parent_native_id": {"type": "string"},
+    "active_branch": {"type": "boolean"},
     "role": {"enum": ["user", "assistant", "system"]},
     "text": {"type": "string"},
     "tool_name": {"type": "string"},
@@ -83,6 +88,11 @@ pub enum ArchiveCommand {
         /// Download every session object during clone.
         #[arg(long)]
         full: bool,
+    },
+    /// Import a ChatGPT, Claude, or T3 Chat account export.
+    Import {
+        /// Export ZIP or JSON file.
+        path: PathBuf,
     },
     /// Show local and remote archive status.
     Status {
@@ -187,6 +197,14 @@ pub fn run(paths: &Paths, command: ArchiveCommand) -> Result<()> {
             machine,
             full,
         } => init(paths, path, remote.as_deref(), machine, full),
+        ArchiveCommand::Import { path } => {
+            let config = ArchiveConfig::load(paths)?;
+            store::ensure_repository(&config.repo_path)?;
+            let stats = store::import_export(paths, &config, &path)?;
+            print_update(&stats, false);
+            println!("Run `agents archive sync` to commit and push this import.");
+            Ok(())
+        }
         ArchiveCommand::Status { offline, verbose } => status(paths, offline, verbose),
         ArchiveCommand::Sync { message } => sync_archive(paths, &message),
         ArchiveCommand::Search { query, limit } => {

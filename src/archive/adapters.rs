@@ -1,17 +1,23 @@
 use std::{
     collections::{BTreeSet, HashMap},
     fs::{self, File},
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
     sync::OnceLock,
     time::UNIX_EPOCH,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use percent_encoding::percent_decode_str;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
+use zip::ZipArchive;
+
+mod chatgpt;
+mod claude_web;
+mod t3chat;
 
 use super::model::{
     Artifact, ArtifactKind, Event, ParsedArtifact, Session, message_event, text_event, tool_event,
@@ -20,6 +26,7 @@ use crate::{config::Paths, util};
 
 static CODEX_TITLES: OnceLock<HashMap<String, (String, Option<String>)>> = OnceLock::new();
 const NORMALIZER_VERSION: u32 = 1;
+const IMPORT_NORMALIZER_VERSION: u32 = 1;
 
 pub fn discover(paths: &Paths) -> Result<Vec<Artifact>> {
     let mut artifacts = Vec::new();
@@ -64,6 +71,120 @@ pub fn discover(paths: &Paths) -> Result<Vec<Artifact>> {
     Ok(artifacts)
 }
 
+pub fn imported(path: &Path) -> Result<Artifact> {
+    if !path.is_file() {
+        bail!("chat export does not exist: {}", path.display());
+    }
+    let path = path.canonicalize()?;
+    let kind = detect_import_kind(&path)?;
+    let source = match kind {
+        ArtifactKind::ChatGptExport => "chatgpt",
+        ArtifactKind::ClaudeWebExport => "claude-web",
+        ArtifactKind::T3ChatExport => "t3chat",
+        _ => unreachable!(),
+    };
+    let mut file = File::open(&path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(Artifact {
+        source,
+        path,
+        kind,
+        fingerprint: format!(
+            "import-v{IMPORT_NORMALIZER_VERSION}:sha256:{}",
+            hex::encode(hasher.finalize())
+        ),
+    })
+}
+
+fn detect_import_kind(path: &Path) -> Result<ArtifactKind> {
+    if path.extension().is_some_and(|extension| extension == "zip") {
+        let mut archive = ZipArchive::new(File::open(path)?)
+            .with_context(|| format!("invalid ZIP export: {}", path.display()))?;
+        let mut names = Vec::with_capacity(archive.len());
+        for index in 0..archive.len() {
+            names.push(archive.by_index(index)?.name().to_owned());
+        }
+        if names
+            .iter()
+            .any(|name| export_file_name(name) == Some("users.json"))
+            && names
+                .iter()
+                .any(|name| export_file_name(name) == Some("conversations.json"))
+        {
+            return Ok(ArtifactKind::ClaudeWebExport);
+        }
+        if names.iter().any(|name| name == "chat.html")
+            || names.iter().any(|name| is_chatgpt_conversations_name(name))
+        {
+            return Ok(ArtifactKind::ChatGptExport);
+        }
+        bail!("ZIP file is not a supported Claude or ChatGPT export");
+    }
+
+    let value: Value = serde_json::from_reader(BufReader::new(File::open(path)?))
+        .with_context(|| format!("chat export is not valid JSON: {}", path.display()))?;
+    if value.get("threads").is_some_and(Value::is_array)
+        && value.get("messages").is_some_and(Value::is_array)
+    {
+        return Ok(ArtifactKind::T3ChatExport);
+    }
+    let first = value.as_array().and_then(|rows| rows.first());
+    if first.is_some_and(|row| row.get("mapping").is_some()) {
+        return Ok(ArtifactKind::ChatGptExport);
+    }
+    if first.is_some_and(|row| row.get("chat_messages").is_some()) {
+        return Ok(ArtifactKind::ClaudeWebExport);
+    }
+    bail!("JSON file is not a supported T3 Chat, Claude, or ChatGPT export")
+}
+
+fn export_file_name(name: &str) -> Option<&str> {
+    Path::new(name).file_name()?.to_str()
+}
+
+fn is_chatgpt_conversations_name(name: &str) -> bool {
+    let Some(file_name) = export_file_name(name) else {
+        return false;
+    };
+    file_name == "conversations.json"
+        || (file_name.starts_with("conversations-") && file_name.ends_with(".json"))
+}
+
+pub(super) fn read_export_json(path: &Path, include: impl Fn(&str) -> bool) -> Result<Vec<Value>> {
+    if !path.extension().is_some_and(|extension| extension == "zip") {
+        return Ok(vec![serde_json::from_reader(BufReader::new(File::open(
+            path,
+        )?))?]);
+    }
+    let mut archive = ZipArchive::new(File::open(path)?)?;
+    let mut values = Vec::new();
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index)?;
+        if !include(entry.name()) {
+            continue;
+        }
+        if entry.size() > 1_073_741_824 {
+            bail!("export entry is larger than 1 GiB: {}", entry.name());
+        }
+        values.push(
+            serde_json::from_reader(&mut entry)
+                .with_context(|| format!("invalid JSON in export entry {}", entry.name()))?,
+        );
+    }
+    if values.is_empty() {
+        bail!("export contains no supported conversation JSON files");
+    }
+    Ok(values)
+}
+
 fn collect_jsonl(
     root: &Path,
     source: &'static str,
@@ -104,6 +225,9 @@ fn artifact(source: &'static str, path: PathBuf, kind: ArtifactKind) -> Result<A
     let companion = match kind {
         ArtifactKind::Grok => path.parent().map(|parent| parent.join("summary.json")),
         ArtifactKind::OpenCode => Some(PathBuf::from(format!("{}-wal", path.to_string_lossy()))),
+        ArtifactKind::ChatGptExport
+        | ArtifactKind::ClaudeWebExport
+        | ArtifactKind::T3ChatExport => None,
         _ => None,
     };
     if let Some(companion) = companion.filter(|candidate| candidate.is_file()) {
@@ -143,6 +267,9 @@ pub fn parse(paths: &Paths, artifact: Artifact) -> Result<ParsedArtifact> {
         ArtifactKind::ClaudeMemory => vec![parse_claude_memory(paths, &artifact.path)?],
         ArtifactKind::OpenCode => parse_opencode(&artifact.path)?,
         ArtifactKind::Grok => parse_grok(&artifact.path)?.into_iter().collect(),
+        ArtifactKind::ChatGptExport => chatgpt::parse(&artifact.path)?,
+        ArtifactKind::ClaudeWebExport => claude_web::parse(&artifact.path)?,
+        ArtifactKind::T3ChatExport => t3chat::parse(&artifact.path)?,
     };
     Ok(ParsedArtifact { artifact, sessions })
 }
@@ -292,6 +419,7 @@ fn parse_codex(path: &Path) -> Result<Option<Session>> {
             native_id: native_id.clone(),
             title: title.unwrap_or_else(|| native_id.clone()),
             parent_session_id: None,
+            parent_event_id: None,
             started_at,
             updated_at,
             cwd,
@@ -421,6 +549,7 @@ fn parse_claude(paths: &Paths, path: &Path) -> Result<Option<Session>> {
                     .into_owned()
             }),
             parent_session_id,
+            parent_event_id: None,
             started_at,
             updated_at,
             cwd,
@@ -455,6 +584,7 @@ fn parse_claude_memory(_paths: &Paths, path: &Path) -> Result<Session> {
             path.file_stem().unwrap_or_default().to_string_lossy()
         ),
         parent_session_id: None,
+        parent_event_id: None,
         started_at: timestamp.clone(),
         updated_at: timestamp.clone(),
         cwd: Some(project.to_owned()),
@@ -549,6 +679,7 @@ fn parse_opencode(path: &Path) -> Result<Vec<Session>> {
                 native_id: native_id.clone(),
                 title: title.unwrap_or_else(|| native_id.clone()),
                 parent_session_id: None,
+                parent_event_id: None,
                 started_at: millis(created),
                 updated_at: millis(updated),
                 cwd: directory,
@@ -676,6 +807,7 @@ fn parse_grok(path: &Path) -> Result<Option<Session>> {
             native_id: native_id.clone(),
             title: string(summary.get("generated_title")).unwrap_or_else(|| native_id.clone()),
             parent_session_id: None,
+            parent_event_id: None,
             started_at: string(summary.get("created_at")),
             updated_at: string(summary.get("updated_at"))
                 .or_else(|| string(summary.get("last_active_at"))),

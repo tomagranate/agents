@@ -12,6 +12,8 @@ pub struct Session {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_event_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
@@ -32,6 +34,12 @@ pub struct Event {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
     pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_native_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_branch: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -72,6 +80,9 @@ pub enum ArtifactKind {
     ClaudeMemory,
     OpenCode,
     Grok,
+    ChatGptExport,
+    ClaudeWebExport,
+    T3ChatExport,
 }
 
 #[derive(Debug)]
@@ -92,6 +103,8 @@ pub struct ArchiveRef {
     pub title: String,
     #[serde(default)]
     pub parent_session_id: Option<String>,
+    #[serde(default)]
+    pub parent_event_id: Option<String>,
     #[serde(default)]
     pub started_at: Option<String>,
     #[serde(default)]
@@ -126,6 +139,9 @@ pub fn message_event(
         sequence: 0,
         timestamp,
         kind: "message".to_owned(),
+        native_id: None,
+        parent_native_id: None,
+        active_branch: None,
         role: Some(role.to_owned()),
         phase,
         text: Some(text),
@@ -141,6 +157,9 @@ pub fn text_event(timestamp: Option<String>, kind: &str, role: &str, text: Strin
         sequence: 0,
         timestamp,
         kind: kind.to_owned(),
+        native_id: None,
+        parent_native_id: None,
+        active_branch: None,
         role: Some(role.to_owned()),
         phase: None,
         text: Some(text),
@@ -156,6 +175,9 @@ pub fn tool_event(timestamp: Option<String>, name: String) -> Event {
         sequence: 0,
         timestamp,
         kind: "tool".to_owned(),
+        native_id: None,
+        parent_native_id: None,
+        active_branch: None,
         role: Some("assistant".to_owned()),
         phase: None,
         text: None,
