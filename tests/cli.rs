@@ -276,9 +276,89 @@ fn syncs_machine_owned_refs_through_one_remote() {
         &[json!({"type":"user","content":[{"type":"text","text":"from machine b"}]})],
     );
     agents(&machine_b)
+        .args(["archive", "update"])
+        .assert()
+        .success();
+    agents(&machine_b)
+        .args(["archive", "cache", "clear"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("archive has uncommitted changes"));
+    agents(&machine_b)
         .args(["archive", "sync"])
         .assert()
         .success();
+    assert!(
+        StdCommand::new("git")
+            .args([
+                "-c",
+                "user.name=Agents Test",
+                "-c",
+                "user.email=agents@example.test",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "Local archive commit",
+            ])
+            .current_dir(machine_b.join("archive"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    agents(&machine_b)
+        .args(["archive", "cache", "clear"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("archive has unpushed commits"));
+    agents(&machine_b)
+        .args(["archive", "sync"])
+        .assert()
+        .success();
+    agents(&machine_b)
+        .args(["archive", "cache", "clear"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Local session cache cleared"));
+    assert!(
+        !machine_b
+            .join(".state/agents/chat-archive-objects")
+            .exists()
+    );
+    assert_eq!(
+        WalkDir::new(machine_b.join("archive/objects"))
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "jsonl")
+            })
+            .count(),
+        0
+    );
+    agents(&machine_b)
+        .args(["archive", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Storage: thin"))
+        .stdout(predicate::str::contains("Available objects: 0 of 2"));
+    agents(&machine_b)
+        .args(["archive", "verify"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Available objects verified: 0"))
+        .stdout(predicate::str::contains("Remote objects: 2"));
+    agents(&machine_b)
+        .args(["archive", "search", "machine"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("metadata:"));
+    agents(&machine_b)
+        .args(["archive", "show", &logical_id[..12]])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("from machine a"));
     agents(&machine_a)
         .args(["archive", "sync"])
         .assert()

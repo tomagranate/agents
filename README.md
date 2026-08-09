@@ -115,6 +115,14 @@ agents archive show <session-id>
 agents archive fetch <session-id>
 ```
 
+Remove downloaded sessions and restore the thin clone:
+
+```sh
+agents archive cache clear
+```
+
+The command keeps archive metadata and the local search index. It refuses uncommitted or unpushed archive changes.
+
 Download and index every session when full-text search needs the complete archive:
 
 ```sh

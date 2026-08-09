@@ -9,7 +9,7 @@ use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{config::Paths, util};
+use crate::{config::Paths, progress::Activity, util};
 
 const README: &str = r#"# Unified chat archive
 
@@ -25,6 +25,7 @@ Archive clones keep metadata locally and fetch session objects when requested.
 Use `agents archive update` to ingest local changes.
 Use `agents archive sync` to ingest, commit, and push changes.
 Use `agents archive show` to fetch one session object.
+Use `agents archive cache clear` to remove downloaded session objects.
 
 Do not add credentials, raw tool output, reasoning, or generated binary artifacts.
 "#;
@@ -108,6 +109,11 @@ pub enum ArchiveCommand {
     Fetch { id: String },
     /// Fetch and cache every session object.
     Hydrate,
+    /// Manage locally cached session data.
+    Cache {
+        #[command(subcommand)]
+        command: ArchiveCacheCommand,
+    },
     /// Rebuild the local full-text index.
     Reindex,
     /// Verify references and locally available objects.
@@ -116,6 +122,12 @@ pub enum ArchiveCommand {
         #[arg(long)]
         full: bool,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ArchiveCacheCommand {
+    /// Return the local archive to a thin-clone state.
+    Clear,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,6 +192,9 @@ pub fn run(paths: &Paths, command: ArchiveCommand) -> Result<()> {
             println!("Fetched session objects: {fetched}.");
             Ok(())
         }
+        ArchiveCommand::Cache {
+            command: ArchiveCacheCommand::Clear,
+        } => clear_cache(paths),
         ArchiveCommand::Reindex => {
             let config = ArchiveConfig::load(paths)?;
             store::rebuild_index(paths, &config)?;
@@ -195,6 +210,107 @@ pub fn run(paths: &Paths, command: ArchiveCommand) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn clear_cache(paths: &Paths) -> Result<()> {
+    let _lock = store::ArchiveLock::acquire(paths)?;
+    let mut config = ArchiveConfig::load(paths)?;
+    store::ensure_repository(&config.repo_path)?;
+    if git_dirty(&config.repo_path)? {
+        bail!("archive has uncommitted changes; run agents archive sync before clearing cache");
+    }
+    if !has_origin(&config.repo_path) {
+        bail!("archive has no origin remote; a thin clone cannot be restored safely");
+    }
+
+    let activity = Activity::new("Checking the archive remote");
+    let fetch = Command::new("git")
+        .args(["fetch", "--prune", "origin"])
+        .current_dir(&config.repo_path)
+        .output()?;
+    if !fetch.status.success() {
+        bail!("could not fetch the archive remote");
+    }
+    let upstream = git_text(
+        &config.repo_path,
+        [
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    )
+    .context("archive branch has no upstream; run agents archive sync first")?;
+    let branch = upstream
+        .strip_prefix("origin/")
+        .context("archive upstream is not on the origin remote")?;
+    let ahead = git_text(
+        &config.repo_path,
+        ["rev-list", "--count", "@{upstream}..HEAD"],
+    )?
+    .parse::<usize>()
+    .context("could not inspect unpushed archive commits")?;
+    if ahead > 0 {
+        bail!("archive has unpushed commits; run agents archive sync before clearing cache");
+    }
+    let remote = git_text(&config.repo_path, ["remote", "get-url", "origin"])?;
+    let parent = config
+        .repo_path
+        .parent()
+        .context("archive repository has no parent directory")?;
+    let staging = tempfile::Builder::new()
+        .prefix(".chat-archive-thin-")
+        .tempdir_in(parent)?;
+    let replacement = staging.path().join("replacement");
+    activity.set_message("Creating a fresh thin clone");
+    let clone = Command::new("git")
+        .args([
+            "clone",
+            "--filter=blob:none",
+            "--sparse",
+            "--single-branch",
+            "--branch",
+            branch,
+            &remote,
+        ])
+        .arg(&replacement)
+        .output()?;
+    if !clone.status.success() {
+        bail!(
+            "could not create the thin clone: {}",
+            String::from_utf8_lossy(&clone.stderr).trim()
+        );
+    }
+    configure_thin_checkout(&replacement)?;
+
+    activity.set_message("Replacing the hydrated checkout");
+    let previous = staging.path().join("previous");
+    fs::rename(&config.repo_path, &previous)?;
+    if let Err(error) = fs::rename(&replacement, &config.repo_path) {
+        let _ = fs::rename(&previous, &config.repo_path);
+        return Err(error).context("could not install the thin archive checkout");
+    }
+    config.thin = true;
+    config.save(paths)?;
+    store::remove_cached_objects(paths)?;
+    activity.set_message("Removing hydrated Git objects");
+    staging.close()?;
+    activity.finish("Thin archive checkout restored");
+
+    store::rebuild_index(paths, &config)?;
+    let activity = Activity::new("Compacting the local archive index");
+    store::compact_index(paths)?;
+    activity.finish("Local archive index compacted");
+    println!("Local session cache cleared. The archive remains configured as a thin clone.");
+    Ok(())
+}
+
+fn git_text<const N: usize>(repo: &std::path::Path, args: [&str; N]) -> Result<String> {
+    let output = Command::new("git").args(args).current_dir(repo).output()?;
+    if !output.status.success() {
+        bail!("git command failed");
+    }
+    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
 }
 
 fn init(
@@ -346,6 +462,7 @@ fn print_update(stats: &store::UpdateStats, dry_run: bool) {
 fn sync_archive(paths: &Paths, message: &str) -> Result<()> {
     let config = ArchiveConfig::load(paths)?;
     store::ensure_repository(&config.repo_path)?;
+    commit_archive_changes(&config, message)?;
     if has_origin(&config.repo_path) && remote_has_head(&config.repo_path) {
         pull_remote(&config.repo_path)?;
     }
@@ -354,6 +471,17 @@ fn sync_archive(paths: &Paths, message: &str) -> Result<()> {
     if stats.changed == 0 {
         store::rebuild_index(paths, &config)?;
     }
+    commit_archive_changes(&config, message)?;
+    if has_origin(&config.repo_path) {
+        push_with_retry(&config.repo_path)?;
+        println!("Pushed the unified archive.");
+    } else {
+        println!("No origin remote is configured. Changes remain local.");
+    }
+    Ok(())
+}
+
+fn commit_archive_changes(config: &ArchiveConfig, message: &str) -> Result<()> {
     if config.thin {
         util::command_status("git", ["add", "--sparse", "-A"], Some(&config.repo_path))?;
     } else {
@@ -363,12 +491,6 @@ fn sync_archive(paths: &Paths, message: &str) -> Result<()> {
         util::command_status("git", ["commit", "-m", message], Some(&config.repo_path))?;
     } else {
         println!("Nothing to commit.");
-    }
-    if has_origin(&config.repo_path) {
-        push_with_retry(&config.repo_path)?;
-        println!("Pushed the unified archive.");
-    } else {
-        println!("No origin remote is configured. Changes remain local.");
     }
     Ok(())
 }

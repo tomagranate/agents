@@ -749,6 +749,20 @@ pub fn hydrate(paths: &Paths, config: &ArchiveConfig) -> Result<usize> {
     Ok(fetched)
 }
 
+pub fn remove_cached_objects(paths: &Paths) -> Result<()> {
+    let cache = paths.state_dir.join("chat-archive-objects");
+    if cache.is_dir() {
+        fs::remove_dir_all(cache)?;
+    }
+    Ok(())
+}
+
+pub fn compact_index(paths: &Paths) -> Result<()> {
+    let connection = state_connection(paths)?;
+    connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;")?;
+    Ok(())
+}
+
 fn object_is_available(paths: &Paths, config: &ArchiveConfig, hash: &str) -> bool {
     object_relative_path(hash).is_ok_and(|relative| {
         config.repo_path.join(relative).is_file()
