@@ -96,7 +96,7 @@ pub enum ArchiveCommand {
         #[arg(short = 'm', long, default_value = "Update chat archive")]
         message: String,
     },
-    /// Search all retained message text.
+    /// Search metadata and locally available message text.
     Search {
         query: String,
         #[arg(short, long, default_value_t = 20)]

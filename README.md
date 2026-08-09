@@ -176,6 +176,8 @@ The default policy excludes:
 
 Updates scan source fingerprints first. Rust workers parse changed sources in parallel.
 
+Long archive operations show an animated terminal spinner. Redirected output uses plain progress lines.
+
 Normalizer versions are part of each fingerprint. Schema changes can reprocess old sources safely.
 
 Missing local histories do not delete archived sessions.
