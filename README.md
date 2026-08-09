@@ -86,6 +86,17 @@ agents archive init \
   --remote git@github.com:OWNER/chat-archive.git
 ```
 
+Remote archives use thin clones by default. The clone downloads metadata, but not session objects.
+
+Use `--full` to download all objects during initialization:
+
+```sh
+agents archive init \
+  --full \
+  --path ~/.local/share/agents/chat-archive \
+  --remote git@github.com:OWNER/chat-archive.git
+```
+
 Ingest local history:
 
 ```sh
@@ -93,6 +104,22 @@ agents archive update
 agents archive status
 agents archive search "liquid glass"
 agents archive verify
+```
+
+Metadata search covers every archived session. Message search covers locally available sessions.
+
+`show` fetches one missing session and keeps it in the local cache:
+
+```sh
+agents archive show <session-id>
+agents archive fetch <session-id>
+```
+
+Download and index every session when full-text search needs the complete archive:
+
+```sh
+agents archive hydrate
+agents archive verify --full
 ```
 
 Pull, ingest, commit, and push in one operation:
@@ -117,13 +144,18 @@ Updates prune unreferenced working-tree objects. Git retains objects from commit
 
 Each machine writes only its own references. This structure prevents most Git conflicts.
 
+Thin clones use Git partial clone and sparse checkout. Git fetches a session object when the command requests it.
+
 The command stores its searchable SQLite index outside the repository:
 
 ```text
 ~/.local/state/agents/chat-archive.sqlite
+~/.local/state/agents/chat-archive-objects/
 ```
 
-The index uses SQLite FTS5. The binary includes SQLite.
+The first path contains the SQLite FTS5 index. The second path caches fetched session objects.
+
+The binary includes SQLite.
 
 The default policy retains:
 

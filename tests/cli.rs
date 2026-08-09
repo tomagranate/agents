@@ -134,9 +134,8 @@ fn archives_all_four_sources_incrementally() {
         .args(["archive", "verify"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "Verified 4 objects and 4 references",
-        ));
+        .stdout(predicate::str::contains("Available objects verified: 4"))
+        .stdout(predicate::str::contains("References verified: 4"));
     agents(home)
         .args(["archive", "search", "alpha"])
         .assert()
@@ -225,6 +224,47 @@ fn syncs_machine_owned_refs_through_one_remote() {
         ])
         .assert()
         .success();
+    agents(&machine_b)
+        .args(["archive", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Storage: thin"))
+        .stdout(predicate::str::contains("Available objects: 0 of 1"));
+    let remote_reference = WalkDir::new(machine_b.join("archive/refs"))
+        .into_iter()
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|value| value == "json")
+        })
+        .unwrap();
+    let reference: serde_json::Value =
+        serde_json::from_slice(&fs::read(remote_reference.path()).unwrap()).unwrap();
+    assert_eq!(reference["title"], "from machine a");
+    let index = Connection::open(machine_b.join(".state/agents/chat-archive.sqlite")).unwrap();
+    assert_eq!(
+        index
+            .query_row(
+                "SELECT count(*) FROM sessions_fts WHERE sessions_fts MATCH 'machine'",
+                [],
+                |row| row.get::<_, usize>(0),
+            )
+            .unwrap(),
+        1
+    );
+    agents(&machine_b)
+        .args(["archive", "search", "machine"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("metadata:"));
+    let logical_id = reference["logical_id"].as_str().unwrap();
+    agents(&machine_b)
+        .args(["archive", "show", &logical_id[..12]])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("from machine a"));
     let grok_dir = machine_b.join(".grok/sessions/%2Fb/grok-b");
     fs::create_dir_all(&grok_dir).unwrap();
     write_jsonl(
@@ -243,9 +283,26 @@ fn syncs_machine_owned_refs_through_one_remote() {
         .args(["archive", "verify"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "Verified 2 objects and 2 references",
-        ));
+        .stdout(predicate::str::contains("Available objects verified: 1"))
+        .stdout(predicate::str::contains("References verified: 2"))
+        .stdout(predicate::str::contains("Remote objects: 1"));
+    agents(&machine_a)
+        .args(["archive", "hydrate"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Fetched session objects: 1"));
+    agents(&machine_a)
+        .args(["archive", "search", "machine b"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("from [machine] [b]"));
+    agents(&machine_a)
+        .args(["archive", "verify"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Available objects verified: 2"))
+        .stdout(predicate::str::contains("References verified: 2"))
+        .stdout(predicate::str::contains("Remote objects: 0"));
 }
 
 fn create_opencode(path: &Path) {
