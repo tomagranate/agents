@@ -70,10 +70,26 @@ fn update_with_delay(
     delay: Duration,
 ) -> Result<UpdateStats> {
     let activity = Activity::delayed("Scanning local chat history", delay);
+    let artifacts = adapters::discover(paths)?;
+    ingest_artifacts(paths, config, artifacts, dry_run, activity)
+}
+
+pub fn import_export(paths: &Paths, config: &ArchiveConfig, path: &Path) -> Result<UpdateStats> {
+    let activity = Activity::new("Reading chat export");
+    let artifact = adapters::imported(path)?;
+    ingest_artifacts(paths, config, vec![artifact], false, activity)
+}
+
+fn ingest_artifacts(
+    paths: &Paths,
+    config: &ArchiveConfig,
+    artifacts: Vec<Artifact>,
+    dry_run: bool,
+    activity: Activity,
+) -> Result<UpdateStats> {
     let _lock = ArchiveLock::acquire(paths)?;
     ensure_repository(&config.repo_path)?;
     let mut connection = state_connection(paths)?;
-    let artifacts = adapters::discover(paths)?;
     activity.set_message(format!("Checking {} discovered sources", artifacts.len()));
     let changed: Vec<_> = artifacts
         .iter()
@@ -130,9 +146,17 @@ fn update_with_delay(
         .into_par_iter()
         .map(|(artifact, session)| {
             let (object_hash, object_size, created) = write_object(paths, config, &session)?;
+            let reference_path = match artifact.kind {
+                super::model::ArtifactKind::ChatGptExport
+                | super::model::ArtifactKind::ClaudeWebExport
+                | super::model::ArtifactKind::T3ChatExport => {
+                    PathBuf::from(format!("account-export:{}", artifact.source))
+                }
+                _ => artifact.path,
+            };
             write_ref(
                 config,
-                &artifact.path,
+                &reference_path,
                 &artifact.fingerprint,
                 &session,
                 &object_hash,
@@ -249,6 +273,7 @@ fn write_ref(
         logical_id: session.logical_id.clone(),
         title: session.title.clone(),
         parent_session_id: session.parent_session_id.clone(),
+        parent_event_id: session.parent_event_id.clone(),
         started_at: session.started_at.clone(),
         updated_at: session.updated_at.clone(),
         cwd: session.cwd.clone(),
@@ -414,6 +439,7 @@ fn reference_rank(reference: &ArchiveRef) -> (&str, usize, &str) {
 fn copy_session_metadata(reference: &mut ArchiveRef, session: &Session) {
     reference.title = session.title.clone();
     reference.parent_session_id = session.parent_session_id.clone();
+    reference.parent_event_id = session.parent_event_id.clone();
     reference.started_at = session.started_at.clone();
     reference.updated_at = session.updated_at.clone();
     reference.cwd = session.cwd.clone();

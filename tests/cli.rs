@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::Write,
     path::Path,
     process::Command as StdCommand,
     time::{SystemTime, UNIX_EPOCH},
@@ -11,6 +12,7 @@ use rusqlite::{Connection, params};
 use serde_json::json;
 use tempfile::TempDir;
 use walkdir::WalkDir;
+use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
 #[test]
 fn package_versions_match() {
@@ -40,6 +42,18 @@ fn write_jsonl(path: &Path, rows: &[serde_json::Value]) {
         .unwrap()
         .join("\n");
     fs::write(path, format!("{contents}\n")).unwrap();
+}
+
+fn write_zip(path: &Path, files: &[(&str, serde_json::Value)]) {
+    let mut archive = ZipWriter::new(fs::File::create(path).unwrap());
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    for (name, value) in files {
+        archive.start_file(name, options).unwrap();
+        archive
+            .write_all(&serde_json::to_vec(value).unwrap())
+            .unwrap();
+    }
+    archive.finish().unwrap();
 }
 
 #[test]
@@ -618,6 +632,218 @@ fn archives_all_four_sources_incrementally() {
     assert!(!objects.contains("secret-tool-output"));
     assert!(!objects.contains("secret-input"));
     assert!(!objects.contains("secret-system"));
+}
+
+#[test]
+fn imports_chatgpt_claude_and_t3chat_exports() {
+    let temporary = TempDir::new().unwrap();
+    let home = temporary.path();
+    let archive = home.join("archive");
+    agents(home)
+        .args([
+            "archive",
+            "init",
+            "--path",
+            archive.to_str().unwrap(),
+            "--machine",
+            "import-test",
+        ])
+        .assert()
+        .success();
+
+    let chatgpt_export = home.join("chatgpt-export.zip");
+    let chatgpt_conversations = json!([{
+        "id": "chatgpt-1",
+        "title": "ChatGPT title",
+        "create_time": 1767225600.25,
+        "update_time": 1767225602.75,
+        "current_node": "assistant-active",
+        "default_model_slug": "gpt-default",
+        "mapping": {
+            "root": {"id":"root", "parent":null, "children":["system"]},
+            "system": {"id":"system", "parent":"root", "children":["user"], "message":{
+                "author":{"role":"system"}, "content":{"content_type":"text", "parts":["secret-chatgpt-system"]}
+            }},
+            "user": {"id":"user", "parent":"system", "children":["hidden", "assistant-abandoned"], "message":{
+                "author":{"role":"user"}, "create_time":1767225601.0,
+                "content":{"content_type":"multimodal_text", "parts":["chatgpt question", {"asset_pointer":"secret-chatgpt-asset"}]}
+            }},
+            "hidden": {"id":"hidden", "parent":"user", "children":["tool"], "message":{
+                "author":{"role":"assistant"}, "metadata":{"is_visually_hidden_from_conversation":true},
+                "content":{"content_type":"text", "parts":["secret-chatgpt-hidden"]}
+            }},
+            "tool": {"id":"tool", "parent":"hidden", "children":["assistant-active"], "message":{
+                "author":{"role":"tool"}, "content":{"content_type":"text", "parts":["secret-chatgpt-tool"]}
+            }},
+            "assistant-active": {"id":"assistant-active", "parent":"tool", "children":[], "message":{
+                "author":{"role":"assistant"}, "create_time":1767225602.5,
+                "metadata":{"model_slug":"gpt-active"},
+                "content":{"content_type":"text", "parts":["chatgpt answer"]}
+            }},
+            "assistant-abandoned": {"id":"assistant-abandoned", "parent":"user", "children":[], "message":{
+                "author":{"role":"assistant"}, "create_time":1767225603.0,
+                "content":{"content_type":"text", "parts":["secret-chatgpt-abandoned"]}
+            }}
+        }
+    }]);
+    write_zip(
+        &chatgpt_export,
+        &[
+            ("nested/chat.html", json!({})),
+            ("nested/conversations.json", chatgpt_conversations),
+        ],
+    );
+    agents(home)
+        .args(["archive", "import", chatgpt_export.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Normalized 1 sessions and 2 events",
+        ));
+
+    let claude_export = home.join("claude-export.zip");
+    let claude_conversations = json!([{
+        "uuid":"claude-web-1", "name":"Claude title", "summary":"claude summary",
+        "created_at":"2026-01-02T00:00:00Z", "updated_at":"2026-01-02T00:00:03Z",
+        "chat_messages":[
+            {"uuid":"claude-user", "parent_message_uuid":"root", "sender":"human", "created_at":"2026-01-02T00:00:01Z",
+             "text":"secret-claude-flattened", "attachments":[{"name":"secret-claude-attachment"}],
+             "content":[{"type":"text", "text":"claude web question"}, {"type":"text", "hidden_in_chat":true, "text":"secret-claude-hidden"}]},
+            {"uuid":"claude-assistant", "parent_message_uuid":"claude-user", "sender":"assistant", "created_at":"2026-01-02T00:00:02Z",
+             "text":"secret-claude-tool-result", "content":[
+                {"type":"text", "text":"claude web answer"},
+                {"type":"tool_use", "name":"web_search", "input":{"query":"secret-claude-input"}},
+                {"type":"tool_result", "content":"secret-claude-result"}
+             ]}
+        ]
+    }]);
+    write_zip(
+        &claude_export,
+        &[
+            ("nested/users.json", json!([])),
+            ("nested/conversations.json", claude_conversations),
+        ],
+    );
+    agents(home)
+        .args(["archive", "import", claude_export.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Normalized 1 sessions and 4 events",
+        ));
+
+    let t3_export = home.join("threads-export.json");
+    fs::write(
+        &t3_export,
+        serde_json::to_vec(&json!({
+            "version":"test",
+            "threads":[
+                {"_id":"internal-parent", "threadId":"t3-parent", "title":"T3 parent", "created_at":1767398400000_i64, "updated_at":1767398402000_i64},
+                {"_id":"internal-branch", "threadId":"t3-branch", "title":"T3 branch", "created_at":1767398403000_i64,
+                 "branchParentThreadId":"internal-parent", "branchParentPublicMessageId":"t3-answer"}
+            ],
+            "messages":[
+                {"threadId":"t3-parent", "messageId":"t3-user", "role":"user", "created_at":1767398400000_i64,
+                 "content":"t3 question", "model":"claude-test", "providerMetadata":{"anthropic":{"secret":"secret-t3-provider"}}},
+                {"threadId":"t3-parent", "messageId":"t3-answer", "role":"assistant", "created_at":1767398401000_i64,
+                 "content":"t3 answer", "model":"claude-test", "parts":[
+                    {"type":"reasoning", "text":"secret-t3-reasoning"},
+                    {"type":"tool_call", "toolName":"search", "args":{"query":"secret-t3-args"}, "result":"secret-t3-result"}
+                 ]},
+                {"threadId":"t3-branch", "messageId":"t3-branch-user", "role":"user", "created_at":1767398403000_i64,
+                 "content":"t3 branch question", "model":"gpt-test"}
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    agents(home)
+        .args(["archive", "import", t3_export.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Normalized 2 sessions and 4 events",
+        ));
+    agents(home)
+        .args(["archive", "import", t3_export.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1 sources; 0 changed"));
+
+    agents(home)
+        .args(["archive", "advanced", "verify"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Available objects verified: 4"))
+        .stdout(predicate::str::contains("References verified: 4"));
+    let machine_refs = fs::read_dir(archive.join("refs"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    for source in ["chatgpt", "claude-web", "t3chat"] {
+        assert!(machine_refs.join(source).is_dir());
+    }
+    let references = WalkDir::new(&machine_refs)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|value| value == "json")
+        })
+        .map(|entry| fs::read_to_string(entry.path()).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!references.contains(home.to_string_lossy().as_ref()));
+    assert!(references.contains("account-export:chatgpt"));
+    assert!(references.contains("account-export:claude-web"));
+    assert!(references.contains("account-export:t3chat"));
+    let objects = WalkDir::new(archive.join("objects"))
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|value| value == "jsonl")
+        })
+        .map(|entry| fs::read_to_string(entry.path()).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for expected in [
+        "chatgpt question",
+        "chatgpt answer",
+        "gpt-active",
+        "claude web question",
+        "claude web answer",
+        "web_search",
+        "t3 branch question",
+        "t3-parent",
+        "t3-answer",
+    ] {
+        assert!(objects.contains(expected), "missing {expected}");
+    }
+    for secret in [
+        "secret-chatgpt-system",
+        "secret-chatgpt-asset",
+        "secret-chatgpt-hidden",
+        "secret-chatgpt-tool",
+        "secret-chatgpt-abandoned",
+        "secret-claude-flattened",
+        "secret-claude-attachment",
+        "secret-claude-hidden",
+        "secret-claude-input",
+        "secret-claude-result",
+        "secret-t3-provider",
+        "secret-t3-reasoning",
+        "secret-t3-args",
+        "secret-t3-result",
+    ] {
+        assert!(!objects.contains(secret), "retained {secret}");
+    }
 }
 
 #[test]

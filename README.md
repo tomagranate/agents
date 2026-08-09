@@ -139,6 +139,21 @@ agents archive status
 agents archive search "liquid glass"
 ```
 
+Import account exports from ChatGPT, Claude, or T3 Chat:
+
+```sh
+agents archive import ~/Downloads/chatgpt-export.zip
+agents archive import ~/Downloads/claude-export.zip
+agents archive import ~/Downloads/threads-export.json
+agents archive sync
+```
+
+The command detects the provider from the export content. It does not copy the raw export.
+
+ChatGPT imports the active branch from each conversation. Claude imports message branch links.
+
+T3 Chat imports thread branches. Reimport the same file after it changes.
+
 Metadata search covers every archived session. Message search covers locally available sessions.
 
 `show` fetches one missing session and keeps it in the local cache:
