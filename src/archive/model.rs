@@ -88,6 +88,26 @@ pub struct ArchiveRef {
     pub source: String,
     pub native_id: String,
     pub logical_id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub parent_session_id: Option<String>,
+    #[serde(default)]
+    pub started_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub git_branch: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub models: BTreeSet<String>,
+    #[serde(default)]
+    pub event_count: usize,
+    #[serde(default)]
+    pub object_size: u64,
     pub object_sha256: String,
     pub source_path: String,
     pub source_fingerprint: String,

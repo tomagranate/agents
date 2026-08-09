@@ -16,12 +16,15 @@ const README: &str = r#"# Unified chat archive
 This private repository stores normalized chat history from supported AI harnesses.
 
 - `objects/sha256/` contains immutable, content-addressed session objects.
-- `refs/<machine>/<source>/` points to the newest object seen by each machine.
+- `refs/<machine>/<source>/` contains the shared metadata index.
 - `machines/` describes archive contributors.
 - `schema/` defines the portable record format.
 
+Archive clones keep metadata locally and fetch session objects when requested.
+
 Use `agents archive update` to ingest local changes.
 Use `agents archive sync` to ingest, commit, and push changes.
+Use `agents archive show` to fetch one session object.
 
 Do not add credentials, raw tool output, reasoning, or generated binary artifacts.
 "#;
@@ -76,6 +79,9 @@ pub enum ArchiveCommand {
         /// Friendly machine name.
         #[arg(long)]
         machine: Option<String>,
+        /// Download every session object during clone.
+        #[arg(long)]
+        full: bool,
     },
     /// Show archive and pending-source counts.
     Status,
@@ -96,12 +102,20 @@ pub enum ArchiveCommand {
         #[arg(short, long, default_value_t = 20)]
         limit: usize,
     },
-    /// Print one normalized session.
+    /// Print one session and fetch its object when needed.
     Show { id: String },
+    /// Fetch and cache one session object.
+    Fetch { id: String },
+    /// Fetch and cache every session object.
+    Hydrate,
     /// Rebuild the local full-text index.
     Reindex,
-    /// Verify object hashes and references.
-    Verify,
+    /// Verify references and locally available objects.
+    Verify {
+        /// Fetch and verify every referenced object.
+        #[arg(long)]
+        full: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,6 +124,8 @@ pub struct ArchiveConfig {
     pub repo_path: PathBuf,
     pub machine_id: String,
     pub machine_name: String,
+    #[serde(default)]
+    pub thin: bool,
 }
 
 impl ArchiveConfig {
@@ -139,7 +155,8 @@ pub fn run(paths: &Paths, command: ArchiveCommand) -> Result<()> {
             path,
             remote,
             machine,
-        } => init(paths, path, remote.as_deref(), machine),
+            full,
+        } => init(paths, path, remote.as_deref(), machine, full),
         ArchiveCommand::Status => status(paths),
         ArchiveCommand::Update { dry_run } => {
             let config = ArchiveConfig::load(paths)?;
@@ -153,16 +170,28 @@ pub fn run(paths: &Paths, command: ArchiveCommand) -> Result<()> {
             let config = ArchiveConfig::load(paths)?;
             store::show(paths, &config, &id)
         }
+        ArchiveCommand::Fetch { id } => {
+            let config = ArchiveConfig::load(paths)?;
+            store::fetch(paths, &config, &id)
+        }
+        ArchiveCommand::Hydrate => {
+            let config = ArchiveConfig::load(paths)?;
+            let fetched = store::hydrate(paths, &config)?;
+            println!("Fetched session objects: {fetched}.");
+            Ok(())
+        }
         ArchiveCommand::Reindex => {
             let config = ArchiveConfig::load(paths)?;
             store::rebuild_index(paths, &config)?;
             println!("Rebuilt the unified search index.");
             Ok(())
         }
-        ArchiveCommand::Verify => {
+        ArchiveCommand::Verify { full } => {
             let config = ArchiveConfig::load(paths)?;
-            let (objects, references) = store::verify(&config)?;
-            println!("Verified {objects} objects and {references} references.");
+            let result = store::verify(paths, &config, full)?;
+            println!("Available objects verified: {}.", result.objects);
+            println!("References verified: {}.", result.references);
+            println!("Remote objects: {}.", result.remote);
             Ok(())
         }
     }
@@ -173,16 +202,19 @@ fn init(
     requested_path: Option<PathBuf>,
     remote: Option<&str>,
     machine: Option<String>,
+    full: bool,
 ) -> Result<()> {
     let repo_path =
         requested_path.unwrap_or_else(|| paths.home.join(".local/share/agents/chat-archive"));
     if let Some(remote) = remote
         && !repo_path.exists()
     {
-        let status = Command::new("git")
-            .args(["clone", remote])
-            .arg(&repo_path)
-            .status()?;
+        let mut command = Command::new("git");
+        command.arg("clone");
+        if !full {
+            command.args(["--filter=blob:none", "--sparse"]);
+        }
+        let status = command.arg(remote).arg(&repo_path).status()?;
         if !status.success() {
             bail!("could not clone {remote}");
         }
@@ -204,6 +236,10 @@ fn init(
         && !has_origin(&repo_path)
     {
         util::command_status("git", ["remote", "add", "origin", remote], Some(&repo_path))?;
+    }
+    let thin = remote.is_some() && !full;
+    if thin {
+        configure_thin_checkout(&repo_path)?;
     }
     for directory in ["objects/sha256", "refs", "machines", "schema/v1"] {
         fs::create_dir_all(repo_path.join(directory))?;
@@ -238,6 +274,7 @@ fn init(
             .map(|config| config.machine_id)
             .unwrap_or_else(|| Uuid::new_v4().to_string()),
         machine_name,
+        thin,
     };
     let machine_record = serde_json::json!({
         "schema_version": 1,
@@ -253,8 +290,10 @@ fn init(
         util::atomic_write(&machine_path, &serde_json::to_vec_pretty(&machine_record)?)?;
     }
     config.save(paths)?;
+    store::rebuild_index(paths, &config)?;
     println!("Archive repository: {}", config.repo_path.display());
     println!("Machine: {} ({})", config.machine_name, config.machine_id);
+    println!("Storage: {}", if config.thin { "thin" } else { "full" });
     println!("Run: agents archive update");
     Ok(())
 }
@@ -263,10 +302,12 @@ fn status(paths: &Paths) -> Result<()> {
     let config = ArchiveConfig::load(paths)?;
     store::ensure_repository(&config.repo_path)?;
     let pending = store::update(paths, &config, true)?;
-    let (objects, references, sessions, messages) = store::counts(paths, &config)?;
+    let (objects, referenced_objects, references, sessions, messages) =
+        store::counts(paths, &config)?;
     println!("Archive: {}", config.repo_path.display());
     println!("Machine: {} ({})", config.machine_name, config.machine_id);
-    println!("Objects: {objects}");
+    println!("Storage: {}", if config.thin { "thin" } else { "full" });
+    println!("Available objects: {objects} of {referenced_objects}");
     println!("References: {references}");
     println!("Indexed sessions: {sessions}");
     println!("Indexed text events: {messages}");
@@ -313,7 +354,11 @@ fn sync_archive(paths: &Paths, message: &str) -> Result<()> {
     if stats.changed == 0 {
         store::rebuild_index(paths, &config)?;
     }
-    util::command_status("git", ["add", "-A"], Some(&config.repo_path))?;
+    if config.thin {
+        util::command_status("git", ["add", "--sparse", "-A"], Some(&config.repo_path))?;
+    } else {
+        util::command_status("git", ["add", "-A"], Some(&config.repo_path))?;
+    }
     if git_dirty(&config.repo_path)? {
         util::command_status("git", ["commit", "-m", message], Some(&config.repo_path))?;
     } else {
@@ -326,6 +371,23 @@ fn sync_archive(paths: &Paths, message: &str) -> Result<()> {
         println!("No origin remote is configured. Changes remain local.");
     }
     Ok(())
+}
+
+fn configure_thin_checkout(repo: &std::path::Path) -> Result<()> {
+    util::command_status(
+        "git",
+        [
+            "sparse-checkout",
+            "set",
+            "--no-cone",
+            "/.gitignore",
+            "/README.md",
+            "/machines/",
+            "/refs/",
+            "/schema/",
+        ],
+        Some(repo),
+    )
 }
 
 fn has_origin(repo: &std::path::Path) -> bool {
