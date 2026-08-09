@@ -281,9 +281,10 @@ fn clear_cache(paths: &Paths) -> Result<()> {
             String::from_utf8_lossy(&clone.stderr).trim()
         );
     }
+    activity.finish("Thin archive clone downloaded");
     configure_thin_checkout(&replacement)?;
 
-    activity.set_message("Replacing the hydrated checkout");
+    let activity = Activity::new("Replacing the hydrated checkout");
     let previous = staging.path().join("previous");
     fs::rename(&config.repo_path, &previous)?;
     if let Err(error) = fs::rename(&replacement, &config.repo_path) {
