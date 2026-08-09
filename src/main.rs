@@ -3,6 +3,7 @@ mod background;
 mod config;
 mod home;
 mod progress;
+mod settings;
 mod updater;
 mod util;
 
@@ -47,6 +48,8 @@ enum Command {
     Skills { harness: Option<String> },
     /// Print effective shared and harness-specific instructions.
     Md { harness: Option<String> },
+    /// Show managed harness settings and local drift.
+    Settings { harness: Option<String> },
     /// Run individual agents-home operations.
     Home {
         #[command(subcommand)]
@@ -87,6 +90,8 @@ enum HomeAdvancedCommand {
     Push,
     /// Apply current content to installed harnesses.
     Apply,
+    /// Capture changed managed settings without Git operations.
+    Capture,
 }
 
 fn main() {
@@ -110,12 +115,17 @@ fn run() -> Result<()> {
         }
         Command::Skills { harness } => home::skills(&paths, harness.as_deref()),
         Command::Md { harness } => home::md(&paths, harness.as_deref()),
+        Command::Settings { harness } => settings::show(&paths, harness.as_deref()),
         Command::Home {
             command: HomeCommand::Advanced { command },
         } => match command {
             HomeAdvancedCommand::Pull => home::pull(&paths),
             HomeAdvancedCommand::Push => home::push(&paths),
             HomeAdvancedCommand::Apply => home::apply(&paths),
+            HomeAdvancedCommand::Capture => {
+                settings::capture(&paths)?;
+                Ok(())
+            }
         },
         Command::Version => {
             println!("agents {}", env!("CARGO_PKG_VERSION"));

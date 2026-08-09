@@ -102,6 +102,11 @@ fn supports_scoped_content_and_public_commands() {
         .args(["md", "codex"])
         .assert()
         .success();
+    agents(temporary.path())
+        .args(["settings", "codex"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("State: synced"));
     agents(temporary.path()).arg("version").assert().success();
     agents(temporary.path())
         .args(["upgrade", "--help"])
@@ -138,8 +143,268 @@ fn commands_are_safe_before_initialization() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Agents home: not initialized"));
+    agents(home)
+        .arg("settings")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Agents home: not initialized"));
     assert!(!home.join(".state/agents/chat-archive.sqlite").exists());
     assert!(!home.join(".agents").exists());
+}
+
+#[test]
+fn manages_native_settings_and_preserves_local_only_values() {
+    let temporary = TempDir::new().unwrap();
+    let home = temporary.path();
+
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    fs::write(
+        home.join(".claude/settings.json"),
+        serde_json::to_vec_pretty(&json!({
+            "permissions": {"defaultMode": "auto"},
+            "effortLevel": "high",
+            "env": {"ANTHROPIC_API_KEY": "local-secret"},
+            "hooks": {"PreToolUse": [{"command": "/local/hook"}]}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    fs::write(
+        home.join(".codex/config.toml"),
+        r#"approval_policy = "never"
+sandbox_mode = "danger-full-access"
+
+[features]
+js_repl = true
+
+[mcp_servers.private]
+command = "/local/server"
+
+[mcp_servers.private.env]
+TOKEN = "local-secret"
+"#,
+    )
+    .unwrap();
+
+    fs::create_dir_all(home.join(".grok")).unwrap();
+    fs::write(
+        home.join(".grok/config.toml"),
+        r#"[ui]
+permission_mode = "auto"
+
+[marketplace]
+credential = "local-secret"
+"#,
+    )
+    .unwrap();
+
+    fs::create_dir_all(home.join(".config/opencode")).unwrap();
+    fs::write(
+        home.join(".config/opencode/opencode.jsonc"),
+        r#"{
+  // Portable permission policy.
+  "permission": {"*": "ask", "edit": "allow"},
+  "provider": {"private": {"apiKey": "local-secret"}},
+  "localPreference": true,
+  "instructions": ["old"]
+}
+"#,
+    )
+    .unwrap();
+
+    agents(home).arg("init").assert().success();
+
+    let claude_source: serde_json::Value = serde_json::from_slice(
+        &fs::read(home.join(".agents/harnesses/claude/settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(claude_source["permissions"]["defaultMode"], "auto");
+    assert!(claude_source.get("env").is_none());
+    assert!(claude_source.get("hooks").is_none());
+
+    let claude_target: serde_json::Value =
+        serde_json::from_slice(&fs::read(home.join(".claude/settings.json")).unwrap()).unwrap();
+    assert_eq!(claude_target["env"]["ANTHROPIC_API_KEY"], "local-secret");
+    assert_eq!(
+        claude_target["hooks"]["PreToolUse"][0]["command"],
+        "/local/hook"
+    );
+
+    let codex_source =
+        fs::read_to_string(home.join(".agents/harnesses/codex/config.toml")).unwrap();
+    assert!(codex_source.contains("approval_policy = \"never\""));
+    assert!(!codex_source.contains("local-secret"));
+    assert!(!codex_source.contains("mcp_servers"));
+    let codex_target = fs::read_to_string(home.join(".codex/config.toml")).unwrap();
+    assert!(codex_target.contains("TOKEN = \"local-secret\""));
+
+    let grok_source = fs::read_to_string(home.join(".agents/harnesses/grok/config.toml")).unwrap();
+    assert!(grok_source.contains("permission_mode = \"auto\""));
+    assert!(!grok_source.contains("local-secret"));
+    let grok_target = fs::read_to_string(home.join(".grok/config.toml")).unwrap();
+    assert!(grok_target.contains("credential = \"local-secret\""));
+
+    let opencode_source: serde_json::Value = serde_json::from_slice(
+        &fs::read(home.join(".agents/harnesses/opencode/opencode.jsonc")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        opencode_source["$schema"],
+        "https://opencode.ai/config.json"
+    );
+    assert_eq!(opencode_source["permission"]["edit"], "allow");
+    assert!(opencode_source.get("provider").is_none());
+    let opencode_target: serde_json::Value =
+        serde_json::from_slice(&fs::read(home.join(".config/opencode/opencode.jsonc")).unwrap())
+            .unwrap();
+    assert_eq!(
+        opencode_target["provider"]["private"]["apiKey"],
+        "local-secret"
+    );
+    assert_eq!(opencode_target["localPreference"], true);
+    assert_eq!(
+        opencode_target["instructions"][0],
+        home.join(".agents/shared/AGENTS.md").display().to_string()
+    );
+
+    agents(home)
+        .arg("settings")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Claude"))
+        .stdout(predicate::str::contains("OpenCode"))
+        .stdout(predicate::str::contains("synced"));
+}
+
+#[test]
+fn syncs_managed_settings_between_machines() {
+    let temporary = TempDir::new().unwrap();
+    let remote = temporary.path().join("agents-home.git");
+    assert!(
+        StdCommand::new("git")
+            .args(["init", "--bare", "-b", "main"])
+            .arg(&remote)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let machine_a = temporary.path().join("home-a");
+    let machine_b = temporary.path().join("home-b");
+    fs::create_dir_all(machine_a.join(".claude")).unwrap();
+    fs::create_dir_all(&machine_b).unwrap();
+    fs::write(
+        machine_a.join(".claude/settings.json"),
+        serde_json::to_vec_pretty(&json!({
+            "permissions": {"defaultMode": "auto"}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    agents(&machine_a)
+        .args(["init", "--no-apply"])
+        .assert()
+        .success();
+    assert!(
+        StdCommand::new("git")
+            .args(["remote", "add", "origin"])
+            .arg(&remote)
+            .current_dir(machine_a.join(".agents"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    agents(&machine_a).arg("sync").assert().success();
+    assert!(
+        StdCommand::new("git")
+            .arg("clone")
+            .arg(&remote)
+            .arg(machine_b.join(".agents"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    agents(&machine_b)
+        .args(["home", "advanced", "apply"])
+        .assert()
+        .success();
+
+    fs::write(
+        machine_a.join(".claude/settings.json"),
+        serde_json::to_vec_pretty(&json!({
+            "permissions": {"defaultMode": "acceptEdits"}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    agents(&machine_a).arg("sync").assert().success();
+    agents(&machine_b).arg("sync").assert().success();
+
+    let installed: serde_json::Value =
+        serde_json::from_slice(&fs::read(machine_b.join(".claude/settings.json")).unwrap())
+            .unwrap();
+    assert_eq!(installed["permissions"]["defaultMode"], "acceptEdits");
+}
+
+#[test]
+fn captures_native_settings_changes_and_reports_conflicts() {
+    let temporary = TempDir::new().unwrap();
+    let home = temporary.path();
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    fs::write(
+        home.join(".claude/settings.json"),
+        serde_json::to_vec_pretty(&json!({
+            "permissions": {"defaultMode": "auto"}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    agents(home).arg("init").assert().success();
+
+    fs::write(
+        home.join(".claude/settings.json"),
+        serde_json::to_vec_pretty(&json!({
+            "permissions": {"defaultMode": "acceptEdits"}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    agents(home)
+        .args(["home", "advanced", "capture"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Captured settings changes"));
+    let captured: serde_json::Value = serde_json::from_slice(
+        &fs::read(home.join(".agents/harnesses/claude/settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(captured["permissions"]["defaultMode"], "acceptEdits");
+
+    fs::write(
+        home.join(".agents/harnesses/claude/settings.json"),
+        serde_json::to_vec_pretty(&json!({
+            "permissions": {"defaultMode": "plan"}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        home.join(".claude/settings.json"),
+        serde_json::to_vec_pretty(&json!({
+            "permissions": {"defaultMode": "bypassPermissions"}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    agents(home)
+        .args(["home", "advanced", "capture"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "changed both locally and in agents-home",
+        ));
 }
 
 #[test]

@@ -1,6 +1,6 @@
 # agents
 
-`agents` manages shared AI agent rules, skills, and normalized chat archives.
+`agents` manages AI agent rules, skills, harness settings, and normalized chat archives.
 
 It supports these harnesses:
 
@@ -51,10 +51,11 @@ Use a private Git repository at `~/.agents` for personal rules and shared skills
   harnesses/
     claude/
       AGENTS.md
+      settings.json
       skills/<name>/SKILL.md
-    codex/
-    grok/
-    opencode/
+    codex/config.toml
+    grok/config.toml
+    opencode/opencode.jsonc
 ```
 
 Common commands:
@@ -67,6 +68,8 @@ agents skills
 agents skills codex
 agents md
 agents md codex
+agents settings
+agents settings codex
 ```
 
 `agents status` and `agents archive status` fetch current remote state. Use `--offline` to use cached Git state. Use `--verbose` to show local paths.
@@ -75,11 +78,27 @@ agents md codex
 
 Shared content applies to every harness. Harness content applies only to its named harness. A harness-specific skill replaces a shared skill with the same name.
 
+Settings remain native to each harness. `agents` does not translate settings between harnesses.
+
+Each settings adapter manages a safe set of portable keys. It preserves unmanaged keys in the installed configuration. Authentication, secret environment values, MCP credentials, project trust, and machine state remain local.
+
+The adapters manage these categories:
+
+- Claude: permissions, auto mode, models, effort, interface, and plugin preferences.
+- Codex: approvals, sandboxing, models, reasoning, features, and plugin preferences.
+- Grok: permissions, models, reasoning, interface, terminal, and plugin preferences.
+- OpenCode: permissions, agents, models, updates, sharing, plugins, and runtime behavior.
+
+`agents sync` detects installed changes to managed keys. It stores those changes in agents-home before the Git update. A three-way comparison detects changes made both remotely and on the current machine.
+
+Use `agents settings` to show settings state for every harness. Use a harness name to print its managed overlay.
+
 Individual operations are available under `agents home advanced`:
 
 ```sh
 agents home advanced pull
 agents home advanced apply
+agents home advanced capture
 agents home advanced push
 ```
 

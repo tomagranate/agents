@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 
-use crate::{config::Paths, progress::Activity, util};
+use crate::{config::Paths, progress::Activity, settings, util};
 
 const HARNESSES: [&str; 4] = ["claude", "codex", "grok", "opencode"];
 const SHARED_TEMPLATE: &str = include_str!("../share/templates/AGENTS.md");
@@ -123,6 +123,10 @@ pub fn status(paths: &Paths, offline: bool, verbose: bool) -> Result<()> {
     println!("  Codex: {}", file_state(&paths.codex_md));
     println!("  Grok: {}", directory_state(&paths.grok_rules));
     println!("  OpenCode: {}", file_state(&paths.opencode_jsonc));
+    println!("Harness settings");
+    for harness in HARNESSES {
+        println!("  {harness}: {}", settings::status_line(paths, harness)?);
+    }
 
     if verbose {
         println!("Paths");
@@ -165,6 +169,7 @@ pub fn init(paths: &Paths, force: bool, do_apply: bool) -> Result<()> {
         fs::create_dir_all(paths.harness_skills(harness))?;
         install_template(&paths.harness_md(harness), harness_template(harness), force)?;
     }
+    settings::initialize(paths)?;
     if !paths.agents_home.join(".git").is_dir() {
         util::command_status("git", ["init", "-b", "main"], Some(&paths.agents_home))?;
         println!("  initialized Git repository");
@@ -198,6 +203,8 @@ pub fn sync(paths: &Paths, message: &str) -> Result<()> {
     if remote {
         rebase_upstream(&paths.agents_home)?;
     }
+    settings::capture(paths)?;
+    commit_home_changes(paths, message)?;
     apply(paths)?;
     if remote {
         push_with_retry(&paths.agents_home)?;
@@ -277,13 +284,7 @@ pub fn apply(paths: &Paths) -> Result<()> {
         &paths.harness_md("grok"),
     )?;
 
-    let opencode = format!(
-        "{{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"instructions\": [\n    \"{}\",\n    \"{}\"\n  ]\n}}\n",
-        paths.shared_md.display(),
-        paths.harness_md("opencode").display()
-    );
-    util::atomic_write(&paths.opencode_jsonc, opencode.as_bytes())?;
-    println!("  wrote {}", paths.opencode_jsonc.display());
+    settings::apply(paths)?;
 
     for (harness, destination) in [
         ("claude", &paths.claude_skills),
