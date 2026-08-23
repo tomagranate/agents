@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, fs, path::Path};
+use std::{collections::BTreeSet, env, fs, path::Path, process::Command};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -23,6 +23,7 @@ struct Server {
     command: Option<String>,
     #[serde(default)]
     args: Vec<String>,
+    npm: Option<String>,
 }
 
 pub fn ensure_catalog(paths: &Paths) -> Result<()> {
@@ -40,6 +41,7 @@ pub fn apply(paths: &Paths) -> Result<()> {
     if servers.is_empty() {
         return Ok(());
     }
+    ensure_installed(&servers)?;
     apply_claude(paths, &servers)?;
     apply_toml_harness(&paths.codex_settings, &servers)?;
     apply_toml_harness(&paths.grok_settings, &servers)?;
@@ -97,6 +99,17 @@ fn validate_server(server: &Server) -> Result<()> {
             server.id
         );
     }
+    if let Some(package) = &server.npm {
+        if has_url {
+            bail!("MCP server '{}' url entries cannot set npm", server.id);
+        }
+        if !is_npm_package(package) {
+            bail!(
+                "MCP server '{}' npm must be a package name such as @scope/name",
+                server.id
+            );
+        }
+    }
     for arg in &server.args {
         if looks_like_secret(arg) {
             bail!(
@@ -120,6 +133,84 @@ fn is_server_id(id: &str) -> bool {
 
 fn looks_like_secret(arg: &str) -> bool {
     arg.contains("://") || arg.contains("TOKEN=") || arg.contains("SECRET=")
+}
+
+fn is_npm_package(spec: &str) -> bool {
+    let len = spec.len();
+    (1..=128).contains(&len)
+        && !spec.contains("://")
+        && !spec.contains("..")
+        && spec
+            .chars()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, '@' | '/' | '-' | '_' | '.'))
+}
+
+fn ensure_installed(servers: &[Server]) -> Result<()> {
+    for server in servers {
+        if server.url.is_some() {
+            continue;
+        }
+        let command = server.command.as_deref().unwrap_or("");
+        if command_on_path(command) {
+            continue;
+        }
+        if let Some(package) = &server.npm {
+            install_npm_package(package)?;
+        }
+        if command_on_path(command) {
+            continue;
+        }
+        match &server.npm {
+            Some(package) => bail!(
+                "MCP server '{}' command '{}' is not on PATH after installing {}",
+                server.id,
+                command,
+                package
+            ),
+            None => bail!(
+                "MCP server '{}' command '{}' is not on PATH",
+                server.id,
+                command
+            ),
+        }
+    }
+    Ok(())
+}
+
+fn install_npm_package(package: &str) -> Result<()> {
+    println!("  installing {package}");
+    util::command_status("npm", ["install", "-g", package], None)
+        .with_context(|| format!("could not install npm package {package}"))?;
+    let _ = Command::new("mise").args(["reshim", "node"]).status();
+    println!("  installed {package}");
+    Ok(())
+}
+
+fn command_on_path(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let Some(path) = env::var_os("PATH") else {
+        return false;
+    };
+    env::split_paths(&path).any(|dir| is_executable(&dir.join(name)))
+}
+
+fn is_executable(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        path.metadata()
+            .map(|meta| meta.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 fn apply_claude(paths: &Paths, servers: &[Server]) -> Result<()> {
@@ -275,6 +366,7 @@ mod tests {
             url: url.map(str::to_owned),
             command: command.map(str::to_owned),
             args: args.iter().map(|value| (*value).to_owned()).collect(),
+            npm: None,
         }
     }
 
@@ -295,5 +387,17 @@ mod tests {
         assert!(
             validate_server(&server("ok", Some("http://insecure.example"), None, &[])).is_err()
         );
+    }
+
+    #[test]
+    fn accepts_npm_package_on_command_servers() {
+        let mut command = server("ok", None, Some("agentprism-workflow"), &[]);
+        command.npm = Some("@automatalabs/mcp-server".to_owned());
+        assert!(validate_server(&command).is_ok());
+        command.npm = Some("https://example.com/pkg".to_owned());
+        assert!(validate_server(&command).is_err());
+        let mut url = server("ok", Some("https://mcp.example/mcp"), None, &[]);
+        url.npm = Some("@automatalabs/mcp-server".to_owned());
+        assert!(validate_server(&url).is_err());
     }
 }

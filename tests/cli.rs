@@ -19,13 +19,41 @@ fn package_versions_match() {
     assert_eq!(env!("CARGO_PKG_VERSION"), include_str!("../VERSION").trim());
 }
 
+fn ensure_stub_mcp_bins(home: &Path) {
+    let bin = home.join(".local/bin");
+    fs::create_dir_all(&bin).unwrap();
+    for name in ["agentprism-workflow", "1password-mcp"] {
+        let path = bin.join(name);
+        if path.exists() {
+            continue;
+        }
+        fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+}
+
+fn path_with_home_bin(home: &Path) -> String {
+    let mut path = home.join(".local/bin").display().to_string();
+    if let Ok(existing) = std::env::var("PATH") {
+        path.push(':');
+        path.push_str(&existing);
+    }
+    path
+}
+
 fn agents(home: &Path) -> Command {
+    ensure_stub_mcp_bins(home);
     let mut command = Command::cargo_bin("agents").expect("agents binary");
     command
         .env("HOME", home)
         .env("AGENTS_HOME", home.join(".agents"))
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_STATE_HOME", home.join(".state"))
+        .env("PATH", path_with_home_bin(home))
         .env("GIT_AUTHOR_NAME", "Agents Test")
         .env("GIT_AUTHOR_EMAIL", "agents@example.test")
         .env("GIT_COMMITTER_NAME", "Agents Test")
@@ -344,7 +372,7 @@ TOKEN = "local-secret"
     );
     assert_eq!(
         claude["mcpServers"]["agentprism-workflow"]["command"],
-        "npx"
+        "agentprism-workflow"
     );
 
     let codex = fs::read_to_string(home.join(".codex/config.toml")).unwrap();
@@ -370,6 +398,77 @@ TOKEN = "local-secret"
     assert_eq!(opencode["mcp"]["cloudflare-api"]["type"], "remote");
     assert_eq!(opencode["mcp"]["1password"]["type"], "local");
     assert_eq!(opencode["mcp"]["1password"]["command"][0], "1password-mcp");
+    assert_eq!(
+        opencode["mcp"]["agentprism-workflow"]["command"][0],
+        "agentprism-workflow"
+    );
+}
+
+#[test]
+fn installs_npm_mcp_package_when_command_is_missing() {
+    let temporary = TempDir::new().unwrap();
+    let home = temporary.path();
+    agents(home).args(["init", "--no-apply"]).assert().success();
+    fs::write(
+        home.join(".agents/shared/mcp.toml"),
+        r#"
+[[servers]]
+id = "installed-mcp"
+command = "installed-mcp"
+npm = "@example/installed-mcp"
+"#,
+    )
+    .unwrap();
+    let npm = home.join(".local/bin/npm");
+    fs::write(
+        &npm,
+        r#"#!/bin/sh
+echo "$@" >> "$HOME/npm.log"
+if [ "$1" = "install" ]; then
+  printf '#!/bin/sh\nexit 0\n' > "$HOME/.local/bin/installed-mcp"
+  chmod +x "$HOME/.local/bin/installed-mcp"
+fi
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&npm, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    agents(home)
+        .args(["home", "advanced", "apply"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "installing @example/installed-mcp",
+        ));
+
+    let log = fs::read_to_string(home.join("npm.log")).unwrap();
+    assert!(log.contains("install -g @example/installed-mcp"));
+    assert!(home.join(".local/bin/installed-mcp").is_file());
+}
+
+#[test]
+fn rejects_missing_mcp_command_without_npm() {
+    let temporary = TempDir::new().unwrap();
+    let home = temporary.path();
+    agents(home).args(["init", "--no-apply"]).assert().success();
+    fs::write(
+        home.join(".agents/shared/mcp.toml"),
+        r#"
+[[servers]]
+id = "missing-bin"
+command = "definitely-not-an-mcp-command"
+"#,
+    )
+    .unwrap();
+    agents(home)
+        .args(["home", "advanced", "apply"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not on PATH"));
 }
 
 #[test]
