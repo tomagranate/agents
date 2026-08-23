@@ -8,10 +8,11 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 
-use crate::{config::Paths, progress::Activity, settings, util};
+use crate::{config::Paths, mcp, progress::Activity, settings, util};
 
 const HARNESSES: [&str; 4] = ["claude", "codex", "grok", "opencode"];
 const SHARED_TEMPLATE: &str = include_str!("../share/templates/AGENTS.md");
+const MCP_TEMPLATE: &str = include_str!("../share/templates/mcp.toml");
 const CLAUDE_TEMPLATE: &str = include_str!("../share/templates/harness/claude.md");
 const CODEX_TEMPLATE: &str = include_str!("../share/templates/harness/codex.md");
 const GROK_TEMPLATE: &str = include_str!("../share/templates/harness/grok.md");
@@ -131,6 +132,7 @@ pub fn status(paths: &Paths, offline: bool, verbose: bool) -> Result<()> {
     if verbose {
         println!("Paths");
         println!("  Shared Markdown: {}", paths.shared_md.display());
+        println!("  Shared MCP: {}", paths.shared_mcp.display());
         println!("  Shared skills: {}", paths.shared_skills.display());
         println!("  Harness content: {}", paths.harnesses_dir.display());
         println!("  State: {}", paths.state_dir.display());
@@ -165,6 +167,7 @@ pub fn init(paths: &Paths, force: bool, do_apply: bool) -> Result<()> {
     );
     fs::create_dir_all(&paths.shared_skills)?;
     install_template(&paths.shared_md, SHARED_TEMPLATE, force)?;
+    install_template(&paths.shared_mcp, MCP_TEMPLATE, force)?;
     for harness in HARNESSES {
         fs::create_dir_all(paths.harness_skills(harness))?;
         install_template(&paths.harness_md(harness), harness_template(harness), force)?;
@@ -285,6 +288,7 @@ pub fn apply(paths: &Paths) -> Result<()> {
     )?;
 
     settings::apply(paths)?;
+    mcp::apply(paths)?;
 
     for (harness, destination) in [
         ("claude", &paths.claude_skills),

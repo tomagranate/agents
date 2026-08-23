@@ -1,0 +1,15 @@
+# Portable MCP servers. `agents sync` upserts these into each harness.
+# Auth stays local. Do not put tokens, env values, or absolute paths here.
+
+[[servers]]
+id = "cloudflare-api"
+url = "https://mcp.cloudflare.com/mcp"
+
+[[servers]]
+id = "agentprism-workflow"
+command = "npx"
+args = ["-y", "@automatalabs/workflows", "mcp"]
+
+[[servers]]
+id = "1password"
+command = "1password-mcp"

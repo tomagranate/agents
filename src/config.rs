@@ -7,9 +7,11 @@ pub struct Paths {
     pub home: PathBuf,
     pub agents_home: PathBuf,
     pub shared_md: PathBuf,
+    pub shared_mcp: PathBuf,
     pub harnesses_dir: PathBuf,
     pub shared_skills: PathBuf,
     pub claude_md: PathBuf,
+    pub claude_json: PathBuf,
     pub claude_settings: PathBuf,
     pub claude_skills: PathBuf,
     pub codex_md: PathBuf,
@@ -46,8 +48,10 @@ impl Paths {
         let opencode_dir = home.join(".config/opencode");
         Ok(Self {
             shared_md: shared_dir.join("AGENTS.md"),
+            shared_mcp: shared_dir.join("mcp.toml"),
             shared_skills: shared_dir.join("skills"),
             claude_md: home.join(".claude/CLAUDE.md"),
+            claude_json: home.join(".claude.json"),
             claude_settings: home.join(".claude/settings.json"),
             claude_skills: home.join(".claude/skills"),
             codex_md: home.join(".codex/AGENTS.md"),
