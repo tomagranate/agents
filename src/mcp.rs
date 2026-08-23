@@ -260,6 +260,9 @@ fn upsert_json_server(map: &mut Map<String, Value>, server: &Server, opencode: b
         object.remove("args");
         if opencode {
             object.insert("type".to_owned(), Value::String("remote".to_owned()));
+        } else {
+            // Claude reads a url with no type as stdio and skips the server.
+            object.insert("type".to_owned(), Value::String("http".to_owned()));
         }
         object.insert("url".to_owned(), Value::String(url.clone()));
         return;

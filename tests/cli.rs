@@ -366,6 +366,7 @@ TOKEN = "local-secret"
         claude["mcpServers"]["cloudflare-api"]["url"],
         "https://mcp.cloudflare.com/mcp"
     );
+    assert_eq!(claude["mcpServers"]["cloudflare-api"]["type"], "http");
     assert_eq!(
         claude["mcpServers"]["1password"]["command"],
         "1password-mcp"
