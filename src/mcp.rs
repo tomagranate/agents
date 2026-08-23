@@ -89,13 +89,13 @@ fn validate_server(server: &Server) -> Result<()> {
             bail!("MCP server '{}' url entries cannot set args", server.id);
         }
     }
-    if let Some(command) = &server.command {
-        if command.contains('/') || command.contains('\\') {
-            bail!(
-                "MCP server '{}' command must be a bare executable name",
-                server.id
-            );
-        }
+    if let Some(command) = &server.command
+        && (command.contains('/') || command.contains('\\'))
+    {
+        bail!(
+            "MCP server '{}' command must be a bare executable name",
+            server.id
+        );
     }
     for arg in &server.args {
         if looks_like_secret(arg) {
