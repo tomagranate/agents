@@ -290,6 +290,109 @@ credential = "local-secret"
         .stdout(predicate::str::contains("Claude"))
         .stdout(predicate::str::contains("OpenCode"))
         .stdout(predicate::str::contains("synced"));
+
+    assert!(home.join(".agents/shared/mcp.toml").is_file());
+}
+
+#[test]
+fn applies_shared_mcp_without_removing_local_servers() {
+    let temporary = TempDir::new().unwrap();
+    let home = temporary.path();
+    agents(home).args(["init", "--no-apply"]).assert().success();
+
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    fs::write(
+        home.join(".claude.json"),
+        r#"{"machineID":"local-machine","mcpServers":{}}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    fs::write(
+        home.join(".codex/config.toml"),
+        r#"[mcp_servers.private]
+command = "/local/server"
+
+[mcp_servers.private.env]
+TOKEN = "local-secret"
+"#,
+    )
+    .unwrap();
+    fs::create_dir_all(home.join(".grok")).unwrap();
+    fs::write(home.join(".grok/config.toml"), "[ui]\n").unwrap();
+    fs::create_dir_all(home.join(".config/opencode")).unwrap();
+    fs::write(
+        home.join(".config/opencode/opencode.jsonc"),
+        r#"{"$schema":"https://opencode.ai/config.json","permission":"allow"}"#,
+    )
+    .unwrap();
+
+    agents(home)
+        .args(["home", "advanced", "apply"])
+        .assert()
+        .success();
+
+    let claude: serde_json::Value =
+        serde_json::from_slice(&fs::read(home.join(".claude.json")).unwrap()).unwrap();
+    assert_eq!(claude["machineID"], "local-machine");
+    assert_eq!(
+        claude["mcpServers"]["cloudflare-api"]["url"],
+        "https://mcp.cloudflare.com/mcp"
+    );
+    assert_eq!(
+        claude["mcpServers"]["1password"]["command"],
+        "1password-mcp"
+    );
+    assert_eq!(
+        claude["mcpServers"]["agentprism-workflow"]["command"],
+        "npx"
+    );
+
+    let codex = fs::read_to_string(home.join(".codex/config.toml")).unwrap();
+    assert!(codex.contains("TOKEN = \"local-secret\""));
+    assert!(codex.contains("/local/server"));
+    assert!(codex.contains("mcp.cloudflare.com"));
+    assert!(codex.contains("1password-mcp"));
+    let overlay = fs::read_to_string(home.join(".agents/harnesses/codex/config.toml")).unwrap();
+    assert!(!overlay.contains("mcp_servers"));
+    assert!(!overlay.contains("local-secret"));
+
+    let grok = fs::read_to_string(home.join(".grok/config.toml")).unwrap();
+    assert!(grok.contains("1password-mcp"));
+    assert!(grok.contains("mcp.cloudflare.com"));
+
+    let opencode: serde_json::Value =
+        serde_json::from_slice(&fs::read(home.join(".config/opencode/opencode.jsonc")).unwrap())
+            .unwrap();
+    assert_eq!(
+        opencode["mcp"]["cloudflare-api"]["url"],
+        "https://mcp.cloudflare.com/mcp"
+    );
+    assert_eq!(opencode["mcp"]["cloudflare-api"]["type"], "remote");
+    assert_eq!(opencode["mcp"]["1password"]["type"], "local");
+    assert_eq!(opencode["mcp"]["1password"]["command"][0], "1password-mcp");
+}
+
+#[test]
+fn rejects_secrets_in_shared_mcp_catalog() {
+    let temporary = TempDir::new().unwrap();
+    let home = temporary.path();
+    agents(home).args(["init", "--no-apply"]).assert().success();
+    fs::write(
+        home.join(".agents/shared/mcp.toml"),
+        r#"
+[[servers]]
+id = "leaky"
+command = "npx"
+args = ["-y", "pkg"]
+env = { TOKEN = "nope" }
+"#,
+    )
+    .unwrap();
+    agents(home)
+        .args(["home", "advanced", "apply"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown field"));
 }
 
 #[test]

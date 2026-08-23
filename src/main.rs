@@ -2,6 +2,7 @@ mod archive;
 mod background;
 mod config;
 mod home;
+mod mcp;
 mod progress;
 mod settings;
 mod updater;

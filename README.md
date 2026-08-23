@@ -82,6 +82,8 @@ Settings remain native to each harness. `agents` does not translate settings bet
 
 Each settings adapter manages a safe set of portable keys. It preserves unmanaged keys in the installed configuration. Authentication, secret environment values, MCP credentials, project trust, and machine state remain local.
 
+Portable MCP servers live in `shared/mcp.toml`. `agents sync` upserts each server id into Claude, Codex, Grok, and OpenCode. Local-only servers and local `env` values stay in place. The catalog may contain HTTPS URLs or a bare command such as `npx`. It must not contain tokens, headers, or absolute paths.
+
 The adapters manage these categories:
 
 - Claude: permissions, auto mode, models, effort, interface, and plugin preferences.
