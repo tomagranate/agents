@@ -133,16 +133,15 @@ pub fn run(args: SudoArgs) -> Result<()> {
 fn run_local(machine: &str, action: Action) -> Result<()> {
     match action {
         Action::Grant => {
-            ensure_op_signed_in()?;
+            println!("agents sudo → {machine} (this machine)");
+            ensure_op_signed_in(true)?;
             install_sudo_ticket()?;
             if let Err(error) = install_local_op_ticket(machine) {
-                eprintln!(
-                    "agents sudo: partial success: sudo ticket active; 1Password setup incomplete"
-                );
+                eprintln!("⚠ sudo ticket active, but 1Password setup is incomplete");
                 return Err(error);
             }
-            println!("agents sudo: 1Password ticket active for 12 hours");
-            println!("agents sudo: revoke both tickets with `agents sudo --revoke`");
+            println!("✓ 1Password ticket active (12 hours)");
+            println!("\nRevoke with `agents sudo --revoke`");
             Ok(())
         }
         Action::Status => {
@@ -177,16 +176,15 @@ fn run_remote(machine: &str, action: Action) -> Result<()> {
     require_remote_target(machine)?;
     match action {
         Action::Grant => {
-            ensure_op_signed_in()?;
+            println!("agents sudo → {machine}");
+            ensure_op_signed_in(false)?;
             run_remote_sudo(machine, RemoteSudoAction::Grant)?;
             if let Err(error) = install_remote_op_ticket(machine) {
-                eprintln!(
-                    "agents sudo: partial success on {machine}: sudo ticket active; 1Password setup incomplete"
-                );
+                eprintln!("⚠ sudo ticket active on {machine}, but 1Password setup is incomplete");
                 return Err(error);
             }
-            println!("agents sudo: 1Password ticket active on {machine} for 12 hours");
-            println!("agents sudo: revoke both tickets with `agents sudo --revoke {machine}`");
+            println!("✓ 1Password ticket active on {machine} (12 hours)");
+            println!("\nRevoke with `agents sudo --revoke {machine}`");
             Ok(())
         }
         Action::Status => {
@@ -250,7 +248,7 @@ fn install_sudo_ticket() -> Result<()> {
     checked_status_quiet_stdout(VISUDO, &["-cf", &rule.path().display().to_string()])
         .context("generated sudo policy is invalid")?;
 
-    println!("agents sudo: authenticate to install {RULE_PATH}");
+    println!("→ sudo authentication (installs {RULE_PATH})");
     checked_status(SUDO, &["-v"])?;
     checked_status(
         SUDO,
@@ -275,7 +273,7 @@ fn install_sudo_ticket() -> Result<()> {
         bail!("global sudo ticket is not active");
     }
 
-    println!("agents sudo: global sudo ticket active for 12 hours");
+    println!("✓ sudo ticket active (12 hours)");
     Ok(())
 }
 
@@ -289,14 +287,14 @@ fn sudo_ticket_active() -> bool {
 
 fn revoke_local_sudo() -> Result<()> {
     checked_status(SUDO, &["-K"])?;
-    println!("agents sudo: sudo ticket revoked");
+    println!("✓ sudo ticket revoked");
     Ok(())
 }
 
 fn remove_local_sudo() -> Result<()> {
     checked_status(SUDO, &[RM, "-f", RULE_PATH])?;
     checked_status(SUDO, &["-K"])?;
-    println!("agents sudo: removed {RULE_PATH} and revoked the sudo ticket");
+    println!("✓ removed {RULE_PATH} and revoked the sudo ticket");
     Ok(())
 }
 
@@ -306,6 +304,8 @@ const REMOTE_AGENTS_SUDO: &str = "PATH=\"$HOME/.local/bin:$PATH\" agents sudo --
 
 fn run_remote_sudo(machine: &str, action: RemoteSudoAction) -> Result<()> {
     let mut command = Command::new("ssh");
+    // LogLevel=ERROR silences the "Connection to <machine> closed." noise from -t.
+    command.args(["-o", "LogLevel=ERROR"]);
     if matches!(action, RemoteSudoAction::Grant | RemoteSudoAction::Remove) {
         command.arg("-t");
     }
@@ -353,13 +353,16 @@ fn check_remote_agents_status(machine: &str, status: ExitStatus) -> Result<()> {
     }
 }
 
-fn ensure_op_signed_in() -> Result<()> {
-    // With desktop-app integration, op prompts through the app GUI, which is
-    // invisible over ssh. Warn before the first op call so a wait is explainable.
-    println!(
-        "agents sudo: 1Password may ask for authorization in the desktop app on this machine; \
-         if you are connected remotely, run `agents sudo <this-machine>` from the machine you are at"
-    );
+// The hint matters for local grants: with desktop-app integration, op prompts
+// through the app GUI, which is invisible over ssh. Remote grants run op on the
+// attended machine, so the prompt is in front of the user and the hint is noise.
+fn ensure_op_signed_in(hint: bool) -> Result<()> {
+    if hint {
+        println!(
+            "→ 1Password may prompt in the desktop app on this machine; \
+             if you are connected remotely, run `agents sudo <machine>` from the machine you are at"
+        );
+    }
     if quiet_op_status(&["whoami"])? {
         return Ok(());
     }
@@ -488,22 +491,26 @@ fn local_op_ticket_active(path: &Path) -> bool {
 
 fn print_status(sudo_active: bool, ticket_exists: bool, op_active: bool) {
     println!(
-        "Sudo ticket: {}",
+        "{} sudo ticket {}",
+        if sudo_active { "✓" } else { "✗" },
         if sudo_active { "active" } else { "inactive" }
     );
+    let op_state = if op_active {
+        "active"
+    } else if ticket_exists {
+        "inactive (file present but rejected)"
+    } else {
+        "inactive (no ticket file)"
+    };
     println!(
-        "1Password ticket file: {}",
-        if ticket_exists { "present" } else { "missing" }
-    );
-    println!(
-        "1Password ticket: {}",
-        if op_active { "active" } else { "inactive" }
+        "{} 1Password ticket {op_state}",
+        if op_active { "✓" } else { "✗" }
     );
 }
 
 fn print_revoke_note() {
     println!(
-        "agents sudo: the 1Password service account lives until expiry; revoke it now in the 1Password app if needed"
+        "Note: the 1Password service account lives until expiry; revoke it in the 1Password app if needed"
     );
 }
 
