@@ -6,6 +6,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use agents::sudo::{
+    ensure_zshenv, remove_zshenv, require_linux, validate_machine_name, validate_user_name,
+};
 use assert_cmd::Command;
 use predicates::prelude::*;
 use rusqlite::{Connection, params};
@@ -59,6 +62,111 @@ fn agents(home: &Path) -> Command {
         .env("GIT_COMMITTER_NAME", "Agents Test")
         .env("GIT_COMMITTER_EMAIL", "agents@example.test");
     command
+}
+
+#[test]
+fn sudo_arguments_are_clear_and_exclusive() {
+    let temporary = TempDir::new().unwrap();
+    agents(temporary.path())
+        .args(["sudo", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[MACHINE]"))
+        .stdout(predicate::str::contains("--status"))
+        .stdout(predicate::str::contains("--revoke"))
+        .stdout(predicate::str::contains("--remove"))
+        .stdout(predicate::str::contains("--sudo-only").not());
+
+    agents(temporary.path())
+        .args(["sudo", "--status", "--revoke"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+
+    agents(temporary.path())
+        .args(["sudo", "remote", "--sudo-only"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--sudo-only cannot target another machine",
+        ));
+}
+
+#[test]
+fn sudo_resolves_a_named_machine_over_ssh() {
+    let temporary = TempDir::new().unwrap();
+    let ssh_log = temporary.path().join("ssh.log");
+    let ssh = temporary.path().join(".local/bin/ssh");
+    fs::create_dir_all(ssh.parent().unwrap()).unwrap();
+    fs::write(
+        &ssh,
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SSH_LOG\"\ncase \"$*\" in\n  *\"uname -s\"*) printf 'Linux\\n1000\\n'; exit 0 ;;\nesac\nexit 1\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    agents(temporary.path())
+        .env("SSH_LOG", &ssh_log)
+        .args(["sudo", "--status", "tombook-linux"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "one or more tickets are inactive on tombook-linux",
+        ));
+
+    let calls = fs::read_to_string(ssh_log).unwrap();
+    assert_eq!(calls.lines().count(), 3);
+    assert!(calls.lines().all(|call| call.starts_with("tombook-linux ")));
+    assert!(calls.contains("agents sudo --sudo-only --status"));
+}
+
+#[test]
+fn sudo_zshenv_block_is_idempotent_and_removable() {
+    let temporary = TempDir::new().unwrap();
+    let zshenv = temporary.path().join(".zshenv");
+    let original = "export KEEP_ME=yes\n";
+    fs::write(&zshenv, original).unwrap();
+
+    ensure_zshenv(&zshenv).unwrap();
+    let first = fs::read_to_string(&zshenv).unwrap();
+    ensure_zshenv(&zshenv).unwrap();
+    let second = fs::read_to_string(&zshenv).unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(first.matches("# >>> agents op-ticket").count(), 1);
+    assert_eq!(first.matches("# <<< agents op-ticket <<<").count(), 1);
+    assert!(first.contains("${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/op-ticket"));
+    assert!(first.contains("export KEEP_ME=yes"));
+
+    remove_zshenv(&zshenv).unwrap();
+    assert_eq!(fs::read_to_string(zshenv).unwrap(), original);
+}
+
+#[test]
+fn sudo_refuses_unsupported_targets_and_user_names() {
+    assert_eq!(
+        require_linux("Darwin").unwrap_err().to_string(),
+        "Linux is required on the target machine"
+    );
+    for user in ["", "space user", "user:rule", "tøm"] {
+        assert!(validate_user_name(user).is_err(), "accepted {user:?}");
+    }
+    for user in ["tom", "tom.agranate", "tom-agranate", "tom_agranate"] {
+        validate_user_name(user).unwrap();
+    }
+    for machine in ["", "-oProxyCommand=bad", "machine name", "host@example"] {
+        assert!(
+            validate_machine_name(machine).is_err(),
+            "accepted {machine:?}"
+        );
+    }
+    for machine in ["tombook-linux", "tomputer.local", "machine_1"] {
+        validate_machine_name(machine).unwrap();
+    }
 }
 
 fn write_jsonl(path: &Path, rows: &[serde_json::Value]) {

@@ -8,6 +8,7 @@ mod settings;
 mod updater;
 mod util;
 
+use agents::sudo;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
@@ -66,6 +67,8 @@ enum Command {
     /// Update this command to the newest release.
     #[command(visible_alias = "upgrade")]
     Update(updater::UpdateArgs),
+    /// Grant sudo and 1Password tickets on a machine.
+    Sudo(sudo::SudoArgs),
     /// Read cached update state and start a background refresh.
     #[command(name = "_shell-check", hide = true)]
     ShellCheck,
@@ -134,6 +137,7 @@ fn run() -> Result<()> {
         }
         Command::Archive { command } => archive::run(&paths, command),
         Command::Update(args) => updater::run(args),
+        Command::Sudo(args) => sudo::run(args),
         Command::ShellCheck => background::shell_check(&paths),
         Command::RefreshUpdates => background::refresh(&paths),
     }
