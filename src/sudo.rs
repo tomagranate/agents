@@ -300,21 +300,22 @@ fn remove_local_sudo() -> Result<()> {
     Ok(())
 }
 
+// Non-interactive ssh shells often miss `~/.local/bin` (where primer installs
+// the CLI), so the remote command prepends it to PATH itself.
+const REMOTE_AGENTS_SUDO: &str = "PATH=\"$HOME/.local/bin:$PATH\" agents sudo --sudo-only";
+
 fn run_remote_sudo(machine: &str, action: RemoteSudoAction) -> Result<()> {
     let mut command = Command::new("ssh");
     if matches!(action, RemoteSudoAction::Grant | RemoteSudoAction::Remove) {
         command.arg("-t");
     }
-    command.arg(machine).args(["agents", "sudo", "--sudo-only"]);
+    let mut remote = String::from(REMOTE_AGENTS_SUDO);
     match action {
         RemoteSudoAction::Grant => {}
-        RemoteSudoAction::Revoke => {
-            command.arg("--revoke");
-        }
-        RemoteSudoAction::Remove => {
-            command.arg("--remove");
-        }
+        RemoteSudoAction::Revoke => remote.push_str(" --revoke"),
+        RemoteSudoAction::Remove => remote.push_str(" --remove"),
     }
+    command.arg(machine).arg(remote);
     let status = command
         .status()
         .with_context(|| format!("could not connect to {machine} with ssh"))?;
@@ -328,7 +329,7 @@ fn run_remote_sudo(machine: &str, action: RemoteSudoAction) -> Result<()> {
 fn remote_sudo_status(machine: &str) -> Result<bool> {
     let status = Command::new("ssh")
         .arg(machine)
-        .args(["agents", "sudo", "--sudo-only", "--status"])
+        .arg(format!("{REMOTE_AGENTS_SUDO} --status"))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -353,6 +354,12 @@ fn check_remote_agents_status(machine: &str, status: ExitStatus) -> Result<()> {
 }
 
 fn ensure_op_signed_in() -> Result<()> {
+    // With desktop-app integration, op prompts through the app GUI, which is
+    // invisible over ssh. Warn before the first op call so a wait is explainable.
+    println!(
+        "agents sudo: 1Password may ask for authorization in the desktop app on this machine; \
+         if you are connected remotely, run `agents sudo <this-machine>` from the machine you are at"
+    );
     if quiet_op_status(&["whoami"])? {
         return Ok(());
     }
