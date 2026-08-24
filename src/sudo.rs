@@ -1,16 +1,22 @@
 use std::{
     env,
     ffi::OsString,
-    fs::{self, OpenOptions},
+    fs,
     io::{self, Write},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Command, ExitStatus, Stdio},
+    thread::{self, JoinHandle},
 };
 
 use anyhow::{Context, Result, bail};
 use chrono::Local;
 use clap::Args;
+use signal_hook::{
+    consts::signal::{SIGHUP, SIGINT, SIGTERM},
+    iterator::{Handle as SignalHandle, Signals},
+    low_level,
+};
 use tempfile::NamedTempFile;
 
 const RULE_PATH: &str = "/etc/sudoers.d/agents-session";
@@ -25,6 +31,7 @@ const VISUDO: &str = "/usr/sbin/visudo";
 
 const BLOCK_START: &str = "# >>> agents op-ticket (managed by `agents sudo`) >>>";
 const BLOCK_END: &str = "# <<< agents op-ticket <<<";
+const REMOTE_OUTPUT_MARKER: &[u8] = b"__AGENTS_OUTPUT_START__\n";
 const ZSHENV_BLOCK: &str = r#"# >>> agents op-ticket (managed by `agents sudo`) >>>
 _op_ticket="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/op-ticket"
 if [ -f "$_op_ticket" ]; then
@@ -34,20 +41,21 @@ unset _op_ticket
 # <<< agents op-ticket <<<
 "#;
 
-const REMOTE_IDENTITY: &str = r#"printf '%s\n%s\n' "$(uname -s)" "$(id -u)""#;
-const REMOTE_WRITE_TICKET: &str = r#"umask 077; d="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"; cat > "$d/op-ticket" && chmod 600 "$d/op-ticket""#;
+const REMOTE_IDENTITY: &str =
+    r#"printf '__AGENTS_OUTPUT_START__\n%s\n%s\n' "$(uname -s)" "$(id -u)""#;
+const REMOTE_WRITE_TICKET: &str = r#"umask 077; d="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"; f="$d/op-ticket"; t=$(mktemp "$d/op-ticket.XXXXXX") || exit 1; trap 'rm -f "$t"' EXIT HUP INT TERM; chmod 600 "$t" && cat > "$t" && mv -f "$t" "$f""#;
 const REMOTE_REMOVE_TICKET: &str =
     r#"d="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"; rm -f "$d/op-ticket""#;
 const REMOTE_TICKET_EXISTS: &str =
     r#"d="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"; test -f "$d/op-ticket""#;
 const REMOTE_OP_ACTIVE: &str = r#"d="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"; f="$d/op-ticket"; test -f "$f" && OP_SERVICE_ACCOUNT_TOKEN="$(cat "$f")" op whoami >/dev/null 2>&1"#;
-const REMOTE_READ_ZSHENV: &str = r#"if [ -f "$HOME/.zshenv" ]; then cat "$HOME/.zshenv"; fi"#;
-const REMOTE_WRITE_ZSHENV: &str = r#"umask 077; cat > "$HOME/.zshenv""#;
+const REMOTE_READ_ZSHENV: &str = r#"printf '__AGENTS_OUTPUT_START__\n'; if [ -f "$HOME/.zshenv" ]; then cat "$HOME/.zshenv"; fi"#;
+const REMOTE_WRITE_ZSHENV: &str = r#"target="$HOME/.zshenv"; temp=$(mktemp "$HOME/.zshenv.agents.XXXXXX") || exit 1; trap 'rm -f "$temp"' EXIT HUP INT TERM; if [ -e "$target" ]; then mode=$(stat -c '%a' "$target") || exit 1; else mode=600; fi; cat > "$temp" && chmod "$mode" "$temp" && mv -f "$temp" "$target""#;
 const REMOTE_ZSHENV_EXISTS: &str = r#"test -f "$HOME/.zshenv""#;
 
 #[derive(Args)]
 pub struct SudoArgs {
-    /// Machine to grant access to. The default is this machine.
+    /// SSH machine name or alias. The default is this machine. user@host is not supported.
     pub machine: Option<String>,
 
     /// Report the sudo and 1Password ticket status.
@@ -71,6 +79,13 @@ pub struct SudoArgs {
 enum Action {
     Grant,
     Status,
+    Revoke,
+    Remove,
+}
+
+#[derive(Clone, Copy)]
+enum RemoteSudoAction {
+    Grant,
     Revoke,
     Remove,
 }
@@ -118,11 +133,14 @@ pub fn run(args: SudoArgs) -> Result<()> {
 fn run_local(machine: &str, action: Action) -> Result<()> {
     match action {
         Action::Grant => {
-            install_sudo_ticket()?;
             ensure_op_signed_in()?;
-            let token = mint_op_ticket(machine)?;
-            write_local_ticket(&local_ticket_path()?, &token)?;
-            ensure_zshenv(&home_zshenv()?)?;
+            install_sudo_ticket()?;
+            if let Err(error) = install_local_op_ticket(machine) {
+                eprintln!(
+                    "agents sudo: partial success: sudo ticket active; 1Password setup incomplete"
+                );
+                return Err(error);
+            }
             println!("agents sudo: 1Password ticket active for 12 hours");
             println!("agents sudo: revoke both tickets with `agents sudo --revoke`");
             Ok(())
@@ -159,12 +177,14 @@ fn run_remote(machine: &str, action: Action) -> Result<()> {
     require_remote_target(machine)?;
     match action {
         Action::Grant => {
-            run_remote_sudo(machine, action)?;
             ensure_op_signed_in()?;
-            let token = mint_op_ticket(machine)?;
-            ssh_with_input(machine, REMOTE_WRITE_TICKET, &token)
-                .context("could not install the remote 1Password ticket")?;
-            ensure_remote_zshenv(machine)?;
+            run_remote_sudo(machine, RemoteSudoAction::Grant)?;
+            if let Err(error) = install_remote_op_ticket(machine) {
+                eprintln!(
+                    "agents sudo: partial success on {machine}: sudo ticket active; 1Password setup incomplete"
+                );
+                return Err(error);
+            }
             println!("agents sudo: 1Password ticket active on {machine} for 12 hours");
             println!("agents sudo: revoke both tickets with `agents sudo --revoke {machine}`");
             Ok(())
@@ -181,14 +201,14 @@ fn run_remote(machine: &str, action: Action) -> Result<()> {
             }
         }
         Action::Revoke => {
-            run_remote_sudo(machine, action)?;
+            run_remote_sudo(machine, RemoteSudoAction::Revoke)?;
             ssh_checked(machine, REMOTE_REMOVE_TICKET)
                 .context("could not remove the remote 1Password ticket")?;
             print_revoke_note();
             Ok(())
         }
         Action::Remove => {
-            run_remote_sudo(machine, action)?;
+            run_remote_sudo(machine, RemoteSudoAction::Remove)?;
             ssh_checked(machine, REMOTE_REMOVE_TICKET)
                 .context("could not remove the remote 1Password ticket")?;
             remove_remote_zshenv(machine)?;
@@ -223,13 +243,11 @@ fn install_sudo_ticket() -> Result<()> {
     validate_user_name(&user)?;
 
     let mut rule = NamedTempFile::new().context("could not create a temporary sudo policy")?;
-    writeln!(
-        rule,
-        "Defaults:{user} timestamp_type=global, timestamp_timeout={TIMEOUT_MINUTES}"
-    )?;
+    let _signal_cleanup = TempFileSignalCleanup::new(rule.path())?;
+    writeln!(rule, "{}", sudoers_rule(&user))?;
     rule.flush()?;
 
-    checked_status(VISUDO, &["-cf", &rule.path().display().to_string()])
+    checked_status_quiet_stdout(VISUDO, &["-cf", &rule.path().display().to_string()])
         .context("generated sudo policy is invalid")?;
 
     println!("agents sudo: authenticate to install {RULE_PATH}");
@@ -248,7 +266,7 @@ fn install_sudo_ticket() -> Result<()> {
             RULE_PATH,
         ],
     )?;
-    checked_status(SUDO, &[VISUDO, "-cf", SUDOERS_PATH])
+    checked_status_quiet_stdout(SUDO, &[VISUDO, "-cf", SUDOERS_PATH])
         .context("installed sudo policy did not validate")?;
 
     // Refresh after the policy changes the ticket scope from terminal to global.
@@ -259,6 +277,10 @@ fn install_sudo_ticket() -> Result<()> {
 
     println!("agents sudo: global sudo ticket active for 12 hours");
     Ok(())
+}
+
+fn sudoers_rule(user: &str) -> String {
+    format!("Defaults:{user} timestamp_type=global, timestamp_timeout={TIMEOUT_MINUTES}")
 }
 
 fn sudo_ticket_active() -> bool {
@@ -278,34 +300,29 @@ fn remove_local_sudo() -> Result<()> {
     Ok(())
 }
 
-fn run_remote_sudo(machine: &str, action: Action) -> Result<()> {
+fn run_remote_sudo(machine: &str, action: RemoteSudoAction) -> Result<()> {
     let mut command = Command::new("ssh");
-    if matches!(action, Action::Grant | Action::Remove) {
+    if matches!(action, RemoteSudoAction::Grant | RemoteSudoAction::Remove) {
         command.arg("-t");
     }
     command.arg(machine).args(["agents", "sudo", "--sudo-only"]);
     match action {
-        Action::Grant => {}
-        Action::Status => {
-            command.arg("--status");
-        }
-        Action::Revoke => {
+        RemoteSudoAction::Grant => {}
+        RemoteSudoAction::Revoke => {
             command.arg("--revoke");
         }
-        Action::Remove => {
+        RemoteSudoAction::Remove => {
             command.arg("--remove");
         }
     }
     let status = command
         .status()
         .with_context(|| format!("could not connect to {machine} with ssh"))?;
-    if status.success() {
-        Ok(())
-    } else if status.code() == Some(255) {
-        bail!("could not connect to {machine}; run `ssh {machine}` to check access")
-    } else {
-        bail!("remote sudo operation failed on {machine}")
+    check_remote_agents_status(machine, status)?;
+    if !status.success() {
+        bail!("remote sudo operation failed on {machine}");
     }
+    Ok(())
 }
 
 fn remote_sudo_status(machine: &str) -> Result<bool> {
@@ -316,10 +333,23 @@ fn remote_sudo_status(machine: &str) -> Result<bool> {
         .stderr(Stdio::null())
         .status()
         .with_context(|| format!("could not connect to {machine} with ssh"))?;
-    if status.code() == Some(255) {
-        bail!("could not connect to {machine}; run `ssh {machine}` to check access");
-    }
+    check_remote_agents_status(machine, status)?;
     Ok(status.success())
+}
+
+fn check_remote_agents_status(machine: &str, status: ExitStatus) -> Result<()> {
+    match status.code() {
+        Some(255) => {
+            bail!("could not connect to {machine}; run `ssh {machine}` to check access")
+        }
+        Some(126 | 127) => bail!(
+            "agents is not installed or cannot run on {machine}; run `primer update` on {machine}"
+        ),
+        Some(2) => bail!(
+            "agents on {machine} does not support `agents sudo`; run `primer update` on {machine}"
+        ),
+        _ => Ok(()),
+    }
 }
 
 fn ensure_op_signed_in() -> Result<()> {
@@ -338,7 +368,10 @@ fn ensure_op_signed_in() -> Result<()> {
 }
 
 fn mint_op_ticket(machine: &str) -> Result<Vec<u8>> {
-    let name = format!("op-ticket-{machine}-{}", Local::now().format("%Y%m%d-%H%M"));
+    let name = format!(
+        "op-ticket-{machine}-{}",
+        Local::now().format("%Y%m%d-%H%M%S")
+    );
     let output = op_command()
         .args([
             "service-account",
@@ -355,7 +388,8 @@ fn mint_op_ticket(machine: &str) -> Result<Vec<u8>> {
         .output()
         .context("could not create the 1Password service account")?;
     if !output.status.success() {
-        bail!("could not create the 1Password service account");
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        bail!("could not create the 1Password service account: {stderr}");
     }
 
     let mut token = output.stdout;
@@ -368,18 +402,71 @@ fn mint_op_ticket(machine: &str) -> Result<Vec<u8>> {
     Ok(token)
 }
 
+fn install_local_op_ticket(machine: &str) -> Result<()> {
+    let token = mint_op_ticket(machine)?;
+    write_local_ticket(&local_ticket_path()?, &token)?;
+    ensure_zshenv(&home_zshenv()?)
+}
+
+fn install_remote_op_ticket(machine: &str) -> Result<()> {
+    let token = mint_op_ticket(machine)?;
+    ssh_with_input(machine, REMOTE_WRITE_TICKET, &token)
+        .context("could not install the remote 1Password ticket")?;
+    ensure_remote_zshenv(machine)
+}
+
 fn write_local_ticket(path: &Path, token: &[u8]) -> Result<()> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
-        .with_context(|| format!("could not write the 1Password ticket at {}", path.display()))?;
-    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    let parent = path
+        .parent()
+        .context("1Password ticket path has no parent")?;
+    let mut file = NamedTempFile::new_in(parent).with_context(|| {
+        format!(
+            "could not prepare the 1Password ticket at {}",
+            path.display()
+        )
+    })?;
+    file.as_file()
+        .set_permissions(fs::Permissions::from_mode(0o600))?;
     file.write_all(token)?;
     file.flush()?;
+    file.as_file().sync_all()?;
+    file.persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("could not write the 1Password ticket at {}", path.display()))?;
     Ok(())
+}
+
+struct TempFileSignalCleanup {
+    handle: SignalHandle,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl TempFileSignalCleanup {
+    fn new(path: &Path) -> Result<Self> {
+        let mut signals = Signals::new([SIGHUP, SIGINT, SIGTERM])
+            .context("could not register temporary-file signal cleanup")?;
+        let handle = signals.handle();
+        let path = path.to_owned();
+        let thread = thread::spawn(move || {
+            if let Some(signal) = signals.forever().next() {
+                let _ = fs::remove_file(path);
+                let _ = low_level::emulate_default_handler(signal);
+            }
+        });
+        Ok(Self {
+            handle,
+            thread: Some(thread),
+        })
+    }
+}
+
+impl Drop for TempFileSignalCleanup {
+    fn drop(&mut self) {
+        self.handle.close();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 fn local_op_ticket_active(path: &Path) -> bool {
@@ -481,7 +568,7 @@ fn strip_managed_blocks(mut contents: String) -> Result<String> {
 }
 
 fn ensure_remote_zshenv(machine: &str) -> Result<()> {
-    let contents = ssh_output(machine, REMOTE_READ_ZSHENV)?;
+    let contents = marked_remote_output(ssh_output(machine, REMOTE_READ_ZSHENV)?)?;
     let text = String::from_utf8(contents).context("remote .zshenv is not valid UTF-8")?;
     let updated = with_managed_block(text)?;
     ssh_with_input(machine, REMOTE_WRITE_ZSHENV, updated.as_bytes())
@@ -492,7 +579,7 @@ fn remove_remote_zshenv(machine: &str) -> Result<()> {
     if !ssh_status(machine, REMOTE_ZSHENV_EXISTS)? {
         return Ok(());
     }
-    let contents = ssh_output(machine, REMOTE_READ_ZSHENV)?;
+    let contents = marked_remote_output(ssh_output(machine, REMOTE_READ_ZSHENV)?)?;
     let text = String::from_utf8(contents).context("remote .zshenv is not valid UTF-8")?;
     let updated = strip_managed_blocks(text.clone())?;
     if updated == text {
@@ -503,7 +590,7 @@ fn remove_remote_zshenv(machine: &str) -> Result<()> {
 }
 
 fn require_remote_target(machine: &str) -> Result<()> {
-    let identity = ssh_output(machine, REMOTE_IDENTITY)?;
+    let identity = marked_remote_output(ssh_output(machine, REMOTE_IDENTITY)?)?;
     let identity = String::from_utf8(identity).context("remote identity is not valid UTF-8")?;
     let mut lines = identity.lines();
     let os_name = lines
@@ -515,6 +602,14 @@ fn require_remote_target(machine: &str) -> Result<()> {
         bail!("run this command as a normal user on {machine}, without sudo");
     }
     Ok(())
+}
+
+fn marked_remote_output(output: Vec<u8>) -> Result<Vec<u8>> {
+    let marker = output
+        .windows(REMOTE_OUTPUT_MARKER.len())
+        .position(|window| window == REMOTE_OUTPUT_MARKER)
+        .context("remote output marker is missing")?;
+    Ok(output[marker + REMOTE_OUTPUT_MARKER.len()..].to_vec())
 }
 
 fn read_optional_text(path: &Path) -> Result<String> {
@@ -545,6 +640,7 @@ fn write_config(path: &Path, contents: &[u8]) -> Result<()> {
             .as_file()
             .set_permissions(fs::Permissions::from_mode(0o600))?;
     }
+    temporary.as_file().sync_all()?;
     temporary
         .persist(path)
         .map_err(|error| error.error)
@@ -666,9 +762,22 @@ fn command_text(program: &str, args: &[&str]) -> Result<String> {
         .output()
         .with_context(|| format!("could not run {program}"))?;
     if !output.status.success() {
-        bail!("{program} exited with {}", output.status);
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        bail!("{program} failed: {stderr}");
     }
     Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+}
+
+fn checked_status_quiet_stdout(program: &str, args: &[&str]) -> Result<()> {
+    let status = Command::new(program)
+        .args(args)
+        .stdout(Stdio::null())
+        .status()
+        .with_context(|| format!("could not run {program}"))?;
+    if !status.success() {
+        bail!("{program} exited with {status}");
+    }
+    Ok(())
 }
 
 fn checked_status(program: &str, args: &[&str]) -> Result<()> {
@@ -718,4 +827,17 @@ fn quiet_status_with_env(program: &str, args: &[&str], key: &str, value: Vec<u8>
         .status()
         .with_context(|| format!("could not run {program}"))?;
     Ok(status.success())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sudoers_rule;
+
+    #[test]
+    fn sudoers_rule_has_the_global_twelve_hour_timeout() {
+        assert_eq!(
+            sudoers_rule("tom"),
+            "Defaults:tom timestamp_type=global, timestamp_timeout=720"
+        );
+    }
 }

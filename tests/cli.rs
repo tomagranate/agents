@@ -100,7 +100,7 @@ fn sudo_resolves_a_named_machine_over_ssh() {
     fs::create_dir_all(ssh.parent().unwrap()).unwrap();
     fs::write(
         &ssh,
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SSH_LOG\"\ncase \"$*\" in\n  *\"uname -s\"*) printf 'Linux\\n1000\\n'; exit 0 ;;\nesac\nexit 1\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SSH_LOG\"\ncase \"$*\" in\n  *\"uname -s\"*) printf '__AGENTS_OUTPUT_START__\\nLinux\\n1000\\n'; exit 0 ;;\nesac\nexit 1\n",
     )
     .unwrap();
     #[cfg(unix)]
@@ -122,6 +122,93 @@ fn sudo_resolves_a_named_machine_over_ssh() {
     assert_eq!(calls.lines().count(), 3);
     assert!(calls.lines().all(|call| call.starts_with("tombook-linux ")));
     assert!(calls.contains("agents sudo --sudo-only --status"));
+}
+
+#[test]
+fn sudo_reports_missing_and_outdated_remote_agents() {
+    let temporary = TempDir::new().unwrap();
+    let ssh = temporary.path().join(".local/bin/ssh");
+    fs::create_dir_all(ssh.parent().unwrap()).unwrap();
+    fs::write(
+        &ssh,
+        "#!/bin/sh\ncase \"$*\" in\n  *\"uname -s\"*) printf '__AGENTS_OUTPUT_START__\\nLinux\\n1000\\n'; exit 0 ;;\n  *\"--status\"*) exit \"$REMOTE_AGENTS_EXIT\" ;;\nesac\nexit 1\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    agents(temporary.path())
+        .env("REMOTE_AGENTS_EXIT", "127")
+        .args(["sudo", "--status", "tombook-linux"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("agents is not installed"))
+        .stderr(predicate::str::contains("primer update"));
+
+    agents(temporary.path())
+        .env("REMOTE_AGENTS_EXIT", "2")
+        .args(["sudo", "--status", "tombook-linux"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("does not support `agents sudo`"))
+        .stderr(predicate::str::contains("primer update"));
+}
+
+#[test]
+fn sudo_sends_the_remote_op_token_only_through_ssh_stdin() {
+    const TOKEN: &str = "test-service-account-token";
+
+    let temporary = TempDir::new().unwrap();
+    let bin = temporary.path().join(".local/bin");
+    let ssh = bin.join("ssh");
+    let op = bin.join("op");
+    let ssh_log = temporary.path().join("ssh.log");
+    let op_log = temporary.path().join("op.log");
+    let event_log = temporary.path().join("events.log");
+    let ssh_stdin = temporary.path().join("ssh.stdin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(
+        &ssh,
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SSH_LOG\"\nprintf 'ssh %s\\n' \"$*\" >> \"$EVENT_LOG\"\ncase \"$*\" in\n  *\"uname -s\"*) printf 'startup noise\\n__AGENTS_OUTPUT_START__\\nLinux\\n1000\\n' ;;\n  *\"agents sudo --sudo-only\"*) exit 0 ;;\n  *\"op-ticket.XXXXXX\"*) cat > \"$SSH_STDIN\" ;;\n  *\"printf '__AGENTS_OUTPUT_START__\"*) printf 'startup noise\\n__AGENTS_OUTPUT_START__\\n' ;;\n  *\".zshenv.agents.XXXXXX\"*) cat > /dev/null ;;\n  *) exit 1 ;;\nesac\n",
+    )
+    .unwrap();
+    fs::write(
+        &op,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$OP_LOG\"\nprintf 'op %s\\n' \"$*\" >> \"$EVENT_LOG\"\nif [ -n \"${{OP_SERVICE_ACCOUNT_TOKEN:-}}\" ]; then exit 9; fi\ncase \"$1\" in\n  whoami) exit 0 ;;\n  service-account) printf '{TOKEN}\\n' ;;\n  *) exit 1 ;;\nesac\n"
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&op, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    agents(temporary.path())
+        .env("SSH_LOG", &ssh_log)
+        .env("SSH_STDIN", &ssh_stdin)
+        .env("OP_LOG", &op_log)
+        .env("EVENT_LOG", &event_log)
+        .env("OP_SERVICE_ACCOUNT_TOKEN", "expired-token")
+        .args(["sudo", "tombook-linux"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(TOKEN).not())
+        .stderr(predicate::str::contains(TOKEN).not());
+
+    assert_eq!(fs::read_to_string(ssh_stdin).unwrap(), TOKEN);
+    assert!(!fs::read_to_string(ssh_log).unwrap().contains(TOKEN));
+    assert!(!fs::read_to_string(op_log).unwrap().contains(TOKEN));
+    let events = fs::read_to_string(event_log).unwrap();
+    assert!(!events.contains(TOKEN));
+    let op_preflight = events.find("op whoami").unwrap();
+    let sudo_leg = events.find("agents sudo --sudo-only").unwrap();
+    assert!(op_preflight < sudo_leg);
 }
 
 #[test]
