@@ -70,6 +70,10 @@ pub struct SudoArgs {
     #[arg(long, conflicts_with_all = ["status", "revoke"])]
     pub remove: bool,
 
+    /// Grant read access to an extra vault (repeatable), e.g. --vault prod-nerve.
+    #[arg(long = "vault", value_name = "VAULT", conflicts_with_all = ["status", "revoke", "remove", "sudo_only"])]
+    pub vaults: Vec<String>,
+
     /// Run only the local sudo operation for a remote caller.
     #[arg(long, hide = true)]
     pub sudo_only: bool,
@@ -116,9 +120,12 @@ pub fn run(args: SudoArgs) -> Result<()> {
     }
 
     require_normal_user()?;
+    for vault in &args.vaults {
+        validate_vault_name(vault)?;
+    }
     if let Some(machine) = args.machine.as_deref() {
         validate_machine_name(machine)?;
-        run_remote(machine, action)
+        run_remote(machine, action, &args.vaults)
     } else {
         require_linux(&command_text(UNAME, &["-s"])?)?;
         let machine = hostname::get()
@@ -126,21 +133,30 @@ pub fn run(args: SudoArgs) -> Result<()> {
             .into_string()
             .map_err(|_| anyhow::anyhow!("this machine name is not valid UTF-8"))?;
         validate_machine_name(&machine)?;
-        run_local(&machine, action)
+        run_local(&machine, action, &args.vaults)
     }
 }
 
-fn run_local(machine: &str, action: Action) -> Result<()> {
+fn ticket_vaults_label(extra_vaults: &[String]) -> String {
+    let mut vaults = vec!["Agents".to_owned(), "Dev".to_owned()];
+    vaults.extend(extra_vaults.iter().cloned());
+    vaults.join(", ")
+}
+
+fn run_local(machine: &str, action: Action, extra_vaults: &[String]) -> Result<()> {
     match action {
         Action::Grant => {
             println!("agents sudo → {machine} (this machine)");
             ensure_op_signed_in(true)?;
             install_sudo_ticket()?;
-            if let Err(error) = install_local_op_ticket(machine) {
+            if let Err(error) = install_local_op_ticket(machine, extra_vaults) {
                 eprintln!("⚠ sudo ticket active, but 1Password setup is incomplete");
                 return Err(error);
             }
-            println!("✓ 1Password ticket active (12 hours)");
+            println!(
+                "✓ 1Password ticket active (12 hours · vaults: {})",
+                ticket_vaults_label(extra_vaults)
+            );
             println!("\nRevoke with `agents sudo --revoke`");
             Ok(())
         }
@@ -172,18 +188,21 @@ fn run_local(machine: &str, action: Action) -> Result<()> {
     }
 }
 
-fn run_remote(machine: &str, action: Action) -> Result<()> {
+fn run_remote(machine: &str, action: Action, extra_vaults: &[String]) -> Result<()> {
     require_remote_target(machine)?;
     match action {
         Action::Grant => {
             println!("agents sudo → {machine}");
             ensure_op_signed_in(false)?;
             run_remote_sudo(machine, RemoteSudoAction::Grant)?;
-            if let Err(error) = install_remote_op_ticket(machine) {
+            if let Err(error) = install_remote_op_ticket(machine, extra_vaults) {
                 eprintln!("⚠ sudo ticket active on {machine}, but 1Password setup is incomplete");
                 return Err(error);
             }
-            println!("✓ 1Password ticket active on {machine} (12 hours)");
+            println!(
+                "✓ 1Password ticket active on {machine} (12 hours · vaults: {})",
+                ticket_vaults_label(extra_vaults)
+            );
             println!("\nRevoke with `agents sudo --revoke {machine}`");
             Ok(())
         }
@@ -377,24 +396,28 @@ fn ensure_op_signed_in(hint: bool) -> Result<()> {
     Ok(())
 }
 
-fn mint_op_ticket(machine: &str) -> Result<Vec<u8>> {
+fn mint_op_ticket(machine: &str, extra_vaults: &[String]) -> Result<Vec<u8>> {
     let name = format!(
         "op-ticket-{machine}-{}",
         Local::now().format("%Y%m%d-%H%M%S")
     );
-    let output = op_command()
-        .args([
-            "service-account",
-            "create",
-            &name,
-            "--expires-in",
-            "12h",
-            "--vault",
-            "Agents:read_items",
-            "--vault",
-            "Dev:read_items",
-            "--raw",
-        ])
+    let mut command = op_command();
+    command.args([
+        "service-account",
+        "create",
+        &name,
+        "--expires-in",
+        "12h",
+        "--vault",
+        "Agents:read_items",
+        "--vault",
+        "Dev:read_items",
+    ]);
+    for vault in extra_vaults {
+        command.args(["--vault", &format!("{vault}:read_items")]);
+    }
+    command.arg("--raw");
+    let output = command
         .output()
         .context("could not create the 1Password service account")?;
     if !output.status.success() {
@@ -412,14 +435,14 @@ fn mint_op_ticket(machine: &str) -> Result<Vec<u8>> {
     Ok(token)
 }
 
-fn install_local_op_ticket(machine: &str) -> Result<()> {
-    let token = mint_op_ticket(machine)?;
+fn install_local_op_ticket(machine: &str, extra_vaults: &[String]) -> Result<()> {
+    let token = mint_op_ticket(machine, extra_vaults)?;
     write_local_ticket(&local_ticket_path()?, &token)?;
     ensure_zshenv(&home_zshenv()?)
 }
 
-fn install_remote_op_ticket(machine: &str) -> Result<()> {
-    let token = mint_op_ticket(machine)?;
+fn install_remote_op_ticket(machine: &str, extra_vaults: &[String]) -> Result<()> {
+    let token = mint_op_ticket(machine, extra_vaults)?;
     ssh_with_input(machine, REMOTE_WRITE_TICKET, &token)
         .context("could not install the remote 1Password ticket")?;
     ensure_remote_zshenv(machine)
@@ -753,6 +776,19 @@ pub fn validate_user_name(user: &str) -> Result<()> {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
     {
         bail!("unsupported user name: {user}");
+    }
+    Ok(())
+}
+
+/// Validate a vault name before passing it to 1Password.
+pub fn validate_vault_name(vault: &str) -> Result<()> {
+    if vault.is_empty()
+        || !vault
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
+        || vault.starts_with('-')
+    {
+        bail!("unsupported vault name: {vault}");
     }
     Ok(())
 }
