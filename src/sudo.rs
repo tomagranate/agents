@@ -74,6 +74,10 @@ pub struct SudoArgs {
     #[arg(long = "vault", value_name = "VAULT", conflicts_with_all = ["status", "revoke", "remove", "sudo_only"])]
     pub vaults: Vec<String>,
 
+    /// Grant write access to the extra vaults as well (Dev is always writable).
+    #[arg(long, requires = "vaults", conflicts_with_all = ["status", "revoke", "remove", "sudo_only"])]
+    pub write: bool,
+
     /// Run only the local sudo operation for a remote caller.
     #[arg(long, hide = true)]
     pub sudo_only: bool,
@@ -125,7 +129,7 @@ pub fn run(args: SudoArgs) -> Result<()> {
     }
     if let Some(machine) = args.machine.as_deref() {
         validate_machine_name(machine)?;
-        run_remote(machine, action, &args.vaults)
+        run_remote(machine, action, &args.vaults, args.write)
     } else {
         require_linux(&command_text(UNAME, &["-s"])?)?;
         let machine = hostname::get()
@@ -133,29 +137,39 @@ pub fn run(args: SudoArgs) -> Result<()> {
             .into_string()
             .map_err(|_| anyhow::anyhow!("this machine name is not valid UTF-8"))?;
         validate_machine_name(&machine)?;
-        run_local(&machine, action, &args.vaults)
+        run_local(&machine, action, &args.vaults, args.write)
     }
 }
 
-fn ticket_vaults_label(extra_vaults: &[String]) -> String {
-    let mut vaults = vec!["Agents".to_owned(), "Dev".to_owned()];
-    vaults.extend(extra_vaults.iter().cloned());
+fn ticket_vaults_label(extra_vaults: &[String], write_extras: bool) -> String {
+    let extra_permissions = if write_extras { "rw" } else { "ro" };
+    let mut vaults = vec!["Agents (ro)".to_owned(), "Dev (rw)".to_owned()];
+    vaults.extend(
+        extra_vaults
+            .iter()
+            .map(|vault| format!("{vault} ({extra_permissions})")),
+    );
     vaults.join(", ")
 }
 
-fn run_local(machine: &str, action: Action, extra_vaults: &[String]) -> Result<()> {
+fn run_local(
+    machine: &str,
+    action: Action,
+    extra_vaults: &[String],
+    write_extras: bool,
+) -> Result<()> {
     match action {
         Action::Grant => {
             println!("agents sudo → {machine} (this machine)");
             ensure_op_signed_in(true)?;
             install_sudo_ticket()?;
-            if let Err(error) = install_local_op_ticket(machine, extra_vaults) {
+            if let Err(error) = install_local_op_ticket(machine, extra_vaults, write_extras) {
                 eprintln!("⚠ sudo ticket active, but 1Password setup is incomplete");
                 return Err(error);
             }
             println!(
                 "✓ 1Password ticket active (12 hours · vaults: {})",
-                ticket_vaults_label(extra_vaults)
+                ticket_vaults_label(extra_vaults, write_extras)
             );
             println!("\nRevoke with `agents sudo --revoke`");
             Ok(())
@@ -188,20 +202,25 @@ fn run_local(machine: &str, action: Action, extra_vaults: &[String]) -> Result<(
     }
 }
 
-fn run_remote(machine: &str, action: Action, extra_vaults: &[String]) -> Result<()> {
+fn run_remote(
+    machine: &str,
+    action: Action,
+    extra_vaults: &[String],
+    write_extras: bool,
+) -> Result<()> {
     require_remote_target(machine)?;
     match action {
         Action::Grant => {
             println!("agents sudo → {machine}");
             ensure_op_signed_in(false)?;
             run_remote_sudo(machine, RemoteSudoAction::Grant)?;
-            if let Err(error) = install_remote_op_ticket(machine, extra_vaults) {
+            if let Err(error) = install_remote_op_ticket(machine, extra_vaults, write_extras) {
                 eprintln!("⚠ sudo ticket active on {machine}, but 1Password setup is incomplete");
                 return Err(error);
             }
             println!(
                 "✓ 1Password ticket active on {machine} (12 hours · vaults: {})",
-                ticket_vaults_label(extra_vaults)
+                ticket_vaults_label(extra_vaults, write_extras)
             );
             println!("\nRevoke with `agents sudo --revoke {machine}`");
             Ok(())
@@ -396,7 +415,7 @@ fn ensure_op_signed_in(hint: bool) -> Result<()> {
     Ok(())
 }
 
-fn mint_op_ticket(machine: &str, extra_vaults: &[String]) -> Result<Vec<u8>> {
+fn mint_op_ticket(machine: &str, extra_vaults: &[String], write_extras: bool) -> Result<Vec<u8>> {
     let name = format!(
         "op-ticket-{machine}-{}",
         Local::now().format("%Y%m%d-%H%M%S")
@@ -411,10 +430,15 @@ fn mint_op_ticket(machine: &str, extra_vaults: &[String]) -> Result<Vec<u8>> {
         "--vault",
         "Agents:read_items",
         "--vault",
-        "Dev:read_items",
+        "Dev:read_items,write_items",
     ]);
+    let extra_permissions = if write_extras {
+        "read_items,write_items"
+    } else {
+        "read_items"
+    };
     for vault in extra_vaults {
-        command.args(["--vault", &format!("{vault}:read_items")]);
+        command.args(["--vault", &format!("{vault}:{extra_permissions}")]);
     }
     command.arg("--raw");
     let output = command
@@ -435,14 +459,22 @@ fn mint_op_ticket(machine: &str, extra_vaults: &[String]) -> Result<Vec<u8>> {
     Ok(token)
 }
 
-fn install_local_op_ticket(machine: &str, extra_vaults: &[String]) -> Result<()> {
-    let token = mint_op_ticket(machine, extra_vaults)?;
+fn install_local_op_ticket(
+    machine: &str,
+    extra_vaults: &[String],
+    write_extras: bool,
+) -> Result<()> {
+    let token = mint_op_ticket(machine, extra_vaults, write_extras)?;
     write_local_ticket(&local_ticket_path()?, &token)?;
     ensure_zshenv(&home_zshenv()?)
 }
 
-fn install_remote_op_ticket(machine: &str, extra_vaults: &[String]) -> Result<()> {
-    let token = mint_op_ticket(machine, extra_vaults)?;
+fn install_remote_op_ticket(
+    machine: &str,
+    extra_vaults: &[String],
+    write_extras: bool,
+) -> Result<()> {
+    let token = mint_op_ticket(machine, extra_vaults, write_extras)?;
     ssh_with_input(machine, REMOTE_WRITE_TICKET, &token)
         .context("could not install the remote 1Password ticket")?;
     ensure_remote_zshenv(machine)
