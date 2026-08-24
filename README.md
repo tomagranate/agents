@@ -70,6 +70,8 @@ agents md
 agents md codex
 agents settings
 agents settings codex
+agents sudo
+agents sudo tombook-linux
 ```
 
 `agents status` and `agents archive status` fetch current remote state. Use `--offline` to use cached Git state. Use `--verbose` to show local paths.
@@ -103,6 +105,35 @@ agents home advanced apply
 agents home advanced capture
 agents home advanced push
 ```
+
+## Machine tickets
+
+Use `agents sudo` to grant 12-hour sudo and 1Password tickets on a Linux machine.
+The 1Password ticket can read items from the `Agents` and `Dev` vaults.
+
+Run the command without a machine name to grant tickets on the current machine:
+
+```sh
+agents sudo
+```
+
+Pass a Tailscale SSH machine name to grant tickets remotely:
+
+```sh
+agents sudo tombook-linux
+```
+
+Use `--status` to check both tickets. Use `--revoke` to revoke both tickets.
+Use `--remove` to also remove the managed sudoers rule and `.zshenv` block.
+
+```sh
+agents sudo --status tombook-linux
+agents sudo --revoke tombook-linux
+agents sudo --remove tombook-linux
+```
+
+The 1Password service account remains active until its 12-hour expiry.
+Use the 1Password app to revoke it immediately.
 
 ## Chat archive
 
