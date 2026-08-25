@@ -3,6 +3,7 @@ mod background;
 mod config;
 mod home;
 mod mcp;
+mod plans;
 mod progress;
 mod settings;
 mod updater;
@@ -64,6 +65,10 @@ enum Command {
         #[command(subcommand)]
         command: archive::ArchiveCommand,
     },
+    /// Manage plans in the plans archive.
+    Plans(plans::PlansArgs),
+    /// Manage public media in the plans archive.
+    Media(plans::MediaArgs),
     /// Update this command to the newest release.
     #[command(visible_alias = "upgrade")]
     Update(updater::UpdateArgs),
@@ -136,6 +141,8 @@ fn run() -> Result<()> {
             Ok(())
         }
         Command::Archive { command } => archive::run(&paths, command),
+        Command::Plans(args) => plans::run(&paths, args),
+        Command::Media(args) => plans::run_media(&paths, args),
         Command::Update(args) => updater::run(args),
         Command::Sudo(args) => sudo::run(args),
         Command::ShellCheck => background::shell_check(&paths),
