@@ -16,7 +16,7 @@ The CLI is one Rust binary. It does not require Python, Node.js, or a separate S
 ### Standalone
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/tomagranate/agents/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/tomagranate/agents/master/install.sh | sh
 ```
 
 Set `INSTALL_DIR` to change the destination. The default is `~/.local/bin`.
@@ -135,22 +135,22 @@ agents sudo --remove tombook-linux
 The 1Password service account remains active until its 12-hour expiry.
 Use the 1Password app to revoke it immediately.
 
-## Chat archive
+## Agents archive
 
 The archive uses a separate private Git repository. Do not store chat data in `agents-home`.
 
 Initialize a local repository:
 
 ```sh
-agents archive init --path ~/.local/share/agents/chat-archive
+agents archive init --path ~/.local/share/agents/agents-archive
 ```
 
 Connect an existing private remote:
 
 ```sh
 agents archive init \
-  --path ~/.local/share/agents/chat-archive \
-  --remote git@github.com:OWNER/chat-archive.git
+  --path ~/.local/share/agents/agents-archive \
+  --remote git@github.com:OWNER/agents-archive.git
 ```
 
 Remote archives use thin clones by default. The clone downloads metadata, but not session objects.
@@ -160,8 +160,8 @@ Use `--full` to download all objects during initialization:
 ```sh
 agents archive init \
   --full \
-  --path ~/.local/share/agents/chat-archive \
-  --remote git@github.com:OWNER/chat-archive.git
+  --path ~/.local/share/agents/agents-archive \
+  --remote git@github.com:OWNER/agents-archive.git
 ```
 
 Synchronize local history:
@@ -223,7 +223,7 @@ agents archive advanced verify
 ### Archive layout
 
 ```text
-chat-archive/
+agents-archive/
   objects/sha256/<prefix>/<hash>.jsonl
   refs/<machine-id>/<source>/<session-id>.json
   machines/<machine-id>.json
@@ -244,6 +244,8 @@ The command stores its searchable SQLite index outside the repository:
 ~/.local/state/agents/chat-archive.sqlite
 ~/.local/state/agents/chat-archive-objects/
 ```
+
+These local index and cache names stay unchanged for compatibility with existing machines.
 
 The first path contains the SQLite FTS5 index. The second path caches fetched session objects.
 

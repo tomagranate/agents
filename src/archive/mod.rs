@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::{config::Paths, progress::Activity, util};
 
-const README: &str = r#"# Unified chat archive
+const README: &str = r#"# Unified agents archive
 
 This private repository stores normalized chat history from supported AI harnesses.
 
@@ -32,7 +32,7 @@ Do not add credentials, raw tool output, reasoning, or generated binary artifact
 
 const SESSION_SCHEMA: &str = r#"{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/tomagranate/agents/chat-archive/session-v1.json",
+  "$id": "https://github.com/tomagranate/agents/agents-archive/session-v1.json",
   "title": "Normalized chat session",
   "type": "object",
   "required": ["type", "schema_version", "logical_id", "source", "native_id", "title"],
@@ -52,7 +52,7 @@ const SESSION_SCHEMA: &str = r#"{
 
 const EVENT_SCHEMA: &str = r#"{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/tomagranate/agents/chat-archive/event-v1.json",
+  "$id": "https://github.com/tomagranate/agents/agents-archive/event-v1.json",
   "title": "Normalized chat event",
   "type": "object",
   "required": ["type", "sequence", "kind"],
@@ -105,7 +105,7 @@ pub enum ArchiveCommand {
     },
     /// Fetch, preserve local work, rebase, ingest, and push the archive.
     Sync {
-        #[arg(short = 'm', long, default_value = "Update chat archive")]
+        #[arg(short = 'm', long, default_value = "Update agents archive")]
         message: String,
     },
     /// Search metadata and locally available message text.
@@ -321,7 +321,7 @@ fn clear_cache(paths: &Paths) -> Result<()> {
         .parent()
         .context("archive repository has no parent directory")?;
     let staging = tempfile::Builder::new()
-        .prefix(".chat-archive-thin-")
+        .prefix(".agents-archive-thin-")
         .tempdir_in(parent)?;
     let replacement = staging.path().join("replacement");
     activity.set_message("Creating a fresh thin clone");
@@ -384,7 +384,7 @@ fn init(
     full: bool,
 ) -> Result<()> {
     let repo_path =
-        requested_path.unwrap_or_else(|| paths.home.join(".local/share/agents/chat-archive"));
+        requested_path.unwrap_or_else(|| paths.home.join(".local/share/agents/agents-archive"));
     if let Some(remote) = remote
         && !repo_path.exists()
     {
@@ -409,7 +409,7 @@ fn init(
                 repo_path.display()
             );
         }
-        util::command_status("git", ["init", "-b", "main"], Some(&repo_path))?;
+        util::command_status("git", ["init", "-b", "master"], Some(&repo_path))?;
     }
     if let Some(remote) = remote
         && !has_origin(&repo_path)

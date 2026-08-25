@@ -174,7 +174,7 @@ pub fn init(paths: &Paths, force: bool, do_apply: bool) -> Result<()> {
     }
     settings::initialize(paths)?;
     if !paths.agents_home.join(".git").is_dir() {
-        util::command_status("git", ["init", "-b", "main"], Some(&paths.agents_home))?;
+        util::command_status("git", ["init", "-b", "master"], Some(&paths.agents_home))?;
         println!("  initialized Git repository");
     }
     if do_apply {

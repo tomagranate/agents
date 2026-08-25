@@ -17,7 +17,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "agents",
     version,
-    about = "Manage shared AI agent configuration and chat archives"
+    about = "Manage shared AI agent configuration and agents archives"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -60,7 +60,7 @@ enum Command {
     },
     /// Print the installed version.
     Version,
-    /// Manage the unified chat archive.
+    /// Manage the unified agents archive.
     Archive {
         #[command(subcommand)]
         command: archive::ArchiveCommand,

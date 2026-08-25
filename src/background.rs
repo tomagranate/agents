@@ -97,7 +97,7 @@ fn print_notices(state: &UpdateState) {
         eprintln!("agents: agents-home has remote changes. Run `agents sync`.");
     }
     if state.archive_behind.is_some_and(|count| count > 0) {
-        eprintln!("agents: the chat archive has remote changes. Run `agents archive sync`.");
+        eprintln!("agents: the agents archive has remote changes. Run `agents archive sync`.");
     }
 }
 

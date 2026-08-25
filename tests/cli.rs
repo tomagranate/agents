@@ -699,7 +699,7 @@ fn syncs_managed_settings_between_machines() {
     let remote = temporary.path().join("agents-home.git");
     assert!(
         StdCommand::new("git")
-            .args(["init", "--bare", "-b", "main"])
+            .args(["init", "--bare", "-b", "master"])
             .arg(&remote)
             .status()
             .unwrap()
@@ -848,7 +848,9 @@ fn shell_check_uses_cached_state_without_waiting_for_network() {
         .success()
         .stderr(predicate::str::contains("CLI 9.0.0 is available"))
         .stderr(predicate::str::contains("agents-home has remote changes"))
-        .stderr(predicate::str::contains("chat archive has remote changes"));
+        .stderr(predicate::str::contains(
+            "agents archive has remote changes",
+        ));
 }
 
 #[test]
@@ -857,7 +859,7 @@ fn home_sync_rebases_local_content_and_pushes_it() {
     let remote = temporary.path().join("agents-home.git");
     assert!(
         StdCommand::new("git")
-            .args(["init", "--bare", "-b", "main"])
+            .args(["init", "--bare", "-b", "master"])
             .arg(&remote)
             .status()
             .unwrap()
@@ -1253,7 +1255,7 @@ fn syncs_machine_owned_refs_through_one_remote() {
     let remote = temporary.path().join("archive.git");
     assert!(
         StdCommand::new("git")
-            .args(["init", "--bare", "-b", "main"])
+            .args(["init", "--bare", "-b", "master"])
             .arg(&remote)
             .status()
             .unwrap()

@@ -69,12 +69,12 @@ install_release() {
   install -m 755 "$temporary/agents" "$INSTALL_DIR/agents"
 }
 
-install_main() {
+install_master() {
   local temporary="$1"
   need cargo
-  printf 'Building agents from main...\n'
-  curl -fsSL "https://github.com/$REPO/archive/refs/heads/main.tar.gz" -o "$temporary/main.tar.gz"
-  tar -xzf "$temporary/main.tar.gz" -C "$temporary"
+  printf 'Building agents from master...\n'
+  curl -fsSL "https://github.com/$REPO/archive/refs/heads/master.tar.gz" -o "$temporary/master.tar.gz"
+  tar -xzf "$temporary/master.tar.gz" -C "$temporary"
   local source
   source="$(find "$temporary" -maxdepth 1 -type d -name 'agents-*' | head -1)"
   [[ -f "$source/Cargo.toml" ]] || fail "source archive is invalid"
@@ -96,7 +96,7 @@ main() {
   trap cleanup EXIT
 
   if [[ "$version" == "main" || "$version" == "master" ]]; then
-    install_main "$temporary"
+    install_master "$temporary"
   else
     install_release "$version" "$target" "$temporary"
   fi
