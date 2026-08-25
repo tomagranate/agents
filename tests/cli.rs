@@ -3,7 +3,9 @@ use std::{
     io::Write,
     path::Path,
     process::Command as StdCommand,
-    time::{SystemTime, UNIX_EPOCH},
+    sync::mpsc::{self, Receiver},
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use agents::sudo::{
@@ -14,6 +16,7 @@ use predicates::prelude::*;
 use rusqlite::{Connection, params};
 use serde_json::json;
 use tempfile::TempDir;
+use tiny_http::{Header, Response, Server, StatusCode};
 use walkdir::WalkDir;
 use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
@@ -1507,4 +1510,344 @@ fn create_opencode(path: &Path) {
             ],
         )
         .unwrap();
+}
+
+struct RequestData {
+    method: String,
+    path: String,
+    body: Vec<u8>,
+}
+
+struct MockServer {
+    endpoint: String,
+    request: Receiver<RequestData>,
+}
+
+/// Answers one request, then records it for assertions.
+fn mock_server(status: u16, body: &'static str, headers: &[(&str, &str)]) -> MockServer {
+    let server = Server::http("127.0.0.1:0").expect("start mock server");
+    let endpoint = format!("http://{}", server.server_addr());
+    let (sender, receiver) = mpsc::channel();
+    let headers = headers
+        .iter()
+        .map(|(name, value)| {
+            Header::from_bytes(name.as_bytes(), value.as_bytes()).expect("valid response header")
+        })
+        .collect::<Vec<_>>();
+
+    thread::spawn(move || {
+        let Some(mut request) = server
+            .recv_timeout(Duration::from_secs(10))
+            .expect("receive mock request")
+        else {
+            return;
+        };
+        let method = request.method().to_string();
+        let path = request.url().to_owned();
+        let mut request_body = Vec::new();
+        request
+            .as_reader()
+            .read_to_end(&mut request_body)
+            .expect("read mock request body");
+
+        let response = headers.iter().cloned().fold(
+            Response::from_string(body).with_status_code(StatusCode(status)),
+            |response, header| response.with_header(header),
+        );
+        request.respond(response).expect("send mock response");
+        sender
+            .send(RequestData {
+                method,
+                path,
+                body: request_body,
+            })
+            .expect("record mock request");
+    });
+
+    MockServer {
+        endpoint,
+        request: receiver,
+    }
+}
+
+#[test]
+fn plans_upload_posts_multipart_and_prints_the_plan_url() {
+    let home = TempDir::new().unwrap();
+    let project_dir = home.path().join("agents");
+    fs::create_dir(&project_dir).unwrap();
+    fs::write(project_dir.join("plan.html"), "<h1>Ship it</h1>").unwrap();
+    let server = mock_server(
+        201,
+        r#"{"plan":{"id":"01PLAN","title":"Ship it"}}"#,
+        &[("Content-Type", "application/json")],
+    );
+
+    agents(home.path())
+        .current_dir(&project_dir)
+        .args([
+            "plans",
+            "upload",
+            "plan.html",
+            "--endpoint",
+            &server.endpoint,
+        ])
+        .assert()
+        .success()
+        .stdout(format!("{}/plans/01PLAN\n", server.endpoint));
+
+    let request = server.request.recv().unwrap();
+    let body = String::from_utf8_lossy(&request.body);
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, "/api/plans");
+    assert!(body.contains("name=\"files\""));
+    assert!(body.contains("filename=\"plan.html\""));
+    assert!(body.contains("<h1>Ship it</h1>"));
+    assert!(body.contains("name=\"project\""));
+    assert!(body.contains("agents"));
+}
+
+#[test]
+fn plans_upload_uses_the_api_location_when_present() {
+    let home = TempDir::new().unwrap();
+    let file = home.path().join("plan.html");
+    fs::write(&file, "<h1>Plan</h1>").unwrap();
+    let server = mock_server(
+        201,
+        r#"{"plan":{"id":"01PLAN"}}"#,
+        &[
+            ("Content-Type", "application/json"),
+            ("Location", "/custom/01PLAN"),
+        ],
+    );
+
+    agents(home.path())
+        .args([
+            "plans",
+            "--endpoint",
+            &server.endpoint,
+            "upload",
+            file.to_str().unwrap(),
+            "--no-project",
+        ])
+        .assert()
+        .success()
+        .stdout(format!("{}/custom/01PLAN\n", server.endpoint));
+}
+
+#[test]
+fn plans_upload_rejects_a_missing_entry_and_oversize_input() {
+    let home = TempDir::new().unwrap();
+    let incomplete = home.path().join("incomplete");
+    fs::create_dir(&incomplete).unwrap();
+    fs::write(incomplete.join("other.html"), "<p>Other</p>").unwrap();
+
+    agents(home.path())
+        .args([
+            "plans",
+            "upload",
+            incomplete.to_str().unwrap(),
+            "--no-project",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "entry file is missing: index.html",
+        ));
+
+    let oversize = home.path().join("oversize");
+    fs::create_dir(&oversize).unwrap();
+    let file = fs::File::create(oversize.join("index.html")).unwrap();
+    file.set_len(10 * 1024 * 1024 + 1).unwrap();
+
+    agents(home.path())
+        .args([
+            "plans",
+            "upload",
+            oversize.to_str().unwrap(),
+            "--no-project",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("upload exceeds the 10 MB limit"));
+}
+
+#[test]
+fn plans_upload_replace_keeps_membership_without_project_flags() {
+    let home = TempDir::new().unwrap();
+    let project_dir = home.path().join("some-other-repo");
+    fs::create_dir(&project_dir).unwrap();
+    fs::write(project_dir.join("plan.html"), "<p>Plan v2</p>").unwrap();
+    let server = mock_server(
+        200,
+        r#"{"plan":{"id":"01PLAN"}}"#,
+        &[("Content-Type", "application/json")],
+    );
+
+    agents(home.path())
+        .current_dir(&project_dir)
+        .args([
+            "plans",
+            "upload",
+            "plan.html",
+            "--replace",
+            "01PLAN",
+            "--endpoint",
+            &server.endpoint,
+        ])
+        .assert()
+        .success();
+
+    let request = server.request.recv().unwrap();
+    let body = String::from_utf8_lossy(&request.body);
+    assert!(body.contains("name=\"replace\""));
+    assert!(!body.contains("name=\"project\""));
+    assert!(!body.contains("name=\"no_project\""));
+}
+
+#[test]
+fn plans_upload_no_project_overrides_project_inference() {
+    let home = TempDir::new().unwrap();
+    let project_dir = home.path().join("inferred-project");
+    fs::create_dir(&project_dir).unwrap();
+    fs::write(project_dir.join("plan.html"), "<p>Plan</p>").unwrap();
+    let server = mock_server(
+        201,
+        r#"{"plan":{"id":"01PLAN"}}"#,
+        &[("Content-Type", "application/json")],
+    );
+
+    agents(home.path())
+        .current_dir(&project_dir)
+        .args([
+            "plans",
+            "upload",
+            "plan.html",
+            "--no-project",
+            "--endpoint",
+            &server.endpoint,
+        ])
+        .assert()
+        .success();
+
+    let request = server.request.recv().unwrap();
+    let body = String::from_utf8_lossy(&request.body);
+    assert!(body.contains("name=\"no_project\""));
+    assert!(!body.contains("name=\"project\""));
+}
+
+#[test]
+fn plans_ls_renders_plans() {
+    let home = TempDir::new().unwrap();
+    let server = mock_server(
+        200,
+        r#"{"plans":[{"id":"01PLAN","title":"Improve uploads","project":{"slug":"agents"},"updated_at":"2026-08-23T00:00:00Z"}]}"#,
+        &[("Content-Type", "application/json")],
+    );
+
+    agents(home.path())
+        .args(["plans", "ls", "--endpoint", &server.endpoint])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "01PLAN\tagents\tImprove uploads\t2026-08-23T00:00:00Z",
+        ));
+
+    let request = server.request.recv().unwrap();
+    assert_eq!(request.method, "GET");
+    assert_eq!(request.path, "/api/plans");
+}
+
+#[test]
+fn plans_endpoint_flag_overrides_the_configured_endpoint() {
+    let home = TempDir::new().unwrap();
+    let config_dir = home.path().join(".config/agents");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(config_dir.join("plans.toml"), "invalid = [").unwrap();
+    let server = mock_server(
+        200,
+        r#"{"plans":[]}"#,
+        &[("Content-Type", "application/json")],
+    );
+
+    agents(home.path())
+        .args([
+            "plans",
+            "ls",
+            "--since",
+            "7d",
+            "--endpoint",
+            &server.endpoint,
+        ])
+        .assert()
+        .success();
+
+    let request = server.request.recv().unwrap();
+    assert_eq!(request.path, "/api/plans?since=7d");
+}
+
+#[test]
+fn plans_reports_an_invalid_configured_endpoint() {
+    let home = TempDir::new().unwrap();
+    let config_dir = home.path().join(".config/agents");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(config_dir.join("plans.toml"), "invalid = [").unwrap();
+
+    agents(home.path())
+        .args(["plans", "ls"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("plans.toml is invalid"));
+}
+
+#[test]
+fn media_put_prints_only_the_url_on_stdout() {
+    let home = TempDir::new().unwrap();
+    let file = home.path().join("shot.png");
+    fs::write(&file, b"png bytes").unwrap();
+    let server = mock_server(
+        201,
+        r#"{"url":"https://media.example/01MEDIA.png","id":"01MEDIA","key":"01MEDIA.png"}"#,
+        &[("Content-Type", "application/json")],
+    );
+
+    agents(home.path())
+        .args([
+            "media",
+            "put",
+            file.to_str().unwrap(),
+            "--endpoint",
+            &server.endpoint,
+        ])
+        .assert()
+        .success()
+        .stdout("https://media.example/01MEDIA.png\n")
+        .stderr(
+            predicate::str::contains("id: 01MEDIA").and(predicate::str::contains("size: 9 bytes")),
+        );
+
+    let request = server.request.recv().unwrap();
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, "/api/media");
+}
+
+#[test]
+fn media_ls_renders_media() {
+    let home = TempDir::new().unwrap();
+    let server = mock_server(
+        200,
+        r#"{"media":[{"id":"01MEDIA","key":"01MEDIA.png","url":"https://media.example/01MEDIA.png","byte_size":9}]}"#,
+        &[("Content-Type", "application/json")],
+    );
+
+    agents(home.path())
+        .args(["media", "ls", "--endpoint", &server.endpoint])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "01MEDIA\t01MEDIA.png\t9\thttps://media.example/01MEDIA.png",
+        ));
+
+    let request = server.request.recv().unwrap();
+    assert_eq!(request.method, "GET");
+    assert_eq!(request.path, "/api/media");
 }

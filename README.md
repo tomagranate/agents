@@ -1,6 +1,6 @@
 # agents
 
-`agents` manages AI agent rules, skills, harness settings, and normalized chat archives.
+`agents` manages AI agent rules, skills, harness settings, normalized chat archives, and the plans archive.
 
 It supports these harnesses:
 
@@ -273,6 +273,46 @@ Long archive operations show an animated terminal spinner. Redirected output use
 Normalizer versions are part of each fingerprint. Schema changes can reprocess old sources safely.
 
 Missing local histories do not delete archived sessions.
+
+## Plans archive
+
+Use `agents plans` to manage implementation plans in the plans archive.
+
+```sh
+agents plans upload plan.html
+agents plans ls
+agents plans show 01PLAN
+agents plans mv 01PLAN other-project
+agents plans rm 01PLAN
+agents plans search "upload limits"
+agents plans open 01PLAN
+agents plans projects
+```
+
+Uploads take one HTML file or one directory. Directory uploads use `index.html` as the entry file.
+Use `--entry` to name a different entry file. Use `--replace <id>` to overwrite the content of one plan.
+
+The command infers the project from the Git remote, or from the current directory name.
+Use `--project <slug>` to name the project. Use `--no-project` to store the plan without one.
+
+Use `agents media` to manage public media in the same archive.
+
+```sh
+agents media put shot.png
+agents media ls
+agents media rm 01MEDIA
+```
+
+The default endpoint is `https://plans.tomagranate.com`. Caddy on the tailnet adds the service credential.
+
+Set a different endpoint in `~/.config/agents/plans.toml`:
+
+```toml
+endpoint = "https://plans.example.com"
+```
+
+Use `--endpoint` to override the configured endpoint for one command.
+Set `AGENTS_PLANS_TOKEN` to send a bearer token. This is only needed to reach the service without Caddy.
 
 ## Update the command
 
