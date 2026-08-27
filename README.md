@@ -70,6 +70,7 @@ agents md
 agents md codex
 agents settings
 agents settings codex
+agents edit
 agents sudo
 agents sudo tombook-linux
 ```

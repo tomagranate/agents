@@ -186,6 +186,13 @@ pub fn init(paths: &Paths, force: bool, do_apply: bool) -> Result<()> {
     }
 }
 
+pub fn edit(paths: &Paths) -> Result<()> {
+    if !paths.agents_home.is_dir() {
+        bail!("agents home is not initialized; run agents init")
+    }
+    util::command_status("zed", [&paths.agents_home], None)
+}
+
 fn install_template(path: &Path, contents: &str, force: bool) -> Result<()> {
     if path.is_file() && !force {
         println!("  keep {}", path.display());
