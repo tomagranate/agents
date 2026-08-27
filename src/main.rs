@@ -53,6 +53,8 @@ enum Command {
     Md { harness: Option<String> },
     /// Show managed harness settings and local drift.
     Settings { harness: Option<String> },
+    /// Open agents-home in Zed.
+    Edit,
     /// Run individual agents-home operations.
     Home {
         #[command(subcommand)]
@@ -125,6 +127,7 @@ fn run() -> Result<()> {
         Command::Skills { harness } => home::skills(&paths, harness.as_deref()),
         Command::Md { harness } => home::md(&paths, harness.as_deref()),
         Command::Settings { harness } => settings::show(&paths, harness.as_deref()),
+        Command::Edit => home::edit(&paths),
         Command::Home {
             command: HomeCommand::Advanced { command },
         } => match command {

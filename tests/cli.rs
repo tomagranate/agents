@@ -68,6 +68,35 @@ fn agents(home: &Path) -> Command {
 }
 
 #[test]
+fn edit_opens_agents_home_in_zed() {
+    let temporary = TempDir::new().unwrap();
+    let home = temporary.path();
+    let agents_home = home.join("custom-agents-home");
+    let zed_log = home.join("zed.log");
+    let zed = home.join(".local/bin/zed");
+    fs::create_dir_all(&agents_home).unwrap();
+    fs::create_dir_all(zed.parent().unwrap()).unwrap();
+    fs::write(&zed, "#!/bin/sh\nprintf '%s\\n' \"$1\" > \"$ZED_LOG\"\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&zed, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    agents(home)
+        .env("AGENTS_HOME", &agents_home)
+        .env("ZED_LOG", &zed_log)
+        .arg("edit")
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(zed_log).unwrap().trim(),
+        agents_home.display().to_string()
+    );
+}
+
+#[test]
 fn sudo_arguments_are_clear_and_exclusive() {
     let temporary = TempDir::new().unwrap();
     agents(temporary.path())
@@ -373,6 +402,13 @@ fn commands_are_safe_before_initialization() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("agents home is not configured"));
+    agents(home)
+        .arg("edit")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "agents home is not initialized; run agents init",
+        ));
     agents(home)
         .args(["archive", "search", "anything"])
         .assert()
