@@ -4,6 +4,7 @@ mod config;
 mod home;
 mod mcp;
 mod plans;
+mod preview;
 mod progress;
 mod settings;
 mod updater;
@@ -76,6 +77,11 @@ enum Command {
     Update(updater::UpdateArgs),
     /// Grant sudo and 1Password tickets on a machine.
     Sudo(sudo::SudoArgs),
+    /// Run expiring development previews through Tailscale.
+    Preview {
+        #[command(subcommand)]
+        command: preview::PreviewCommand,
+    },
     /// Read cached update state and start a background refresh.
     #[command(name = "_shell-check", hide = true)]
     ShellCheck,
@@ -148,6 +154,7 @@ fn run() -> Result<()> {
         Command::Media(args) => plans::run_media(&paths, args),
         Command::Update(args) => updater::run(args),
         Command::Sudo(args) => sudo::run(args),
+        Command::Preview { command } => preview::run(command),
         Command::ShellCheck => background::shell_check(&paths),
         Command::RefreshUpdates => background::refresh(&paths),
     }

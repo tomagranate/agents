@@ -73,6 +73,7 @@ agents settings codex
 agents edit
 agents sudo
 agents sudo tombook-linux
+agents preview list
 ```
 
 `agents status` and `agents archive status` fetch current remote state. Use `--offline` to use cached Git state. Use `--verbose` to show local paths.
@@ -135,6 +136,22 @@ agents sudo --remove tombook-linux
 
 The 1Password service account remains active until its 12-hour expiry.
 Use the 1Password app to revoke it immediately.
+
+## Development previews
+
+`agents preview` keeps a development server alive through a systemd user service and exposes it through Tailscale HTTPS. Previews expire after 12 hours by default.
+
+```sh
+agents preview start worldforge-crm --port 43131 -- corepack pnpm dev
+agents preview status worldforge-crm
+agents preview extend worldforge-crm 12h
+agents preview stop worldforge-crm
+agents preview prune
+```
+
+Starting the same name replaces the existing process and route. `extend` restarts the process with a fresh lease. `stop` removes the process, route, and local metadata.
+
+The development server must serve HTTP and HMR WebSockets through the same local port. This command currently requires Linux, systemd, and Tailscale.
 
 ## Agents archive
 
