@@ -91,7 +91,26 @@ struct Head {
     method: String,
     path: String,
     host: String,
+    /// The `Origin` header, present on every browser-issued POST.
+    origin: Option<String>,
     raw: Vec<u8>,
+}
+
+impl Head {
+    /// Browsers send `Origin` on cross-site POSTs even when CORS blocks the
+    /// response, so a page anywhere could stop or remove a preview. Refuse
+    /// any origin that is not this host. Requests with no `Origin`, such as
+    /// curl on the box, are allowed.
+    fn same_origin(&self) -> bool {
+        let Some(origin) = &self.origin else {
+            return true;
+        };
+        let origin_host = origin
+            .strip_prefix("https://")
+            .or_else(|| origin.strip_prefix("http://"))
+            .unwrap_or("");
+        !origin_host.is_empty() && origin_host.eq_ignore_ascii_case(&self.host)
+    }
 }
 
 /// What the sweep should do with one record.
@@ -245,6 +264,13 @@ impl Daemon {
                 )
             }
             ("POST", path) => {
+                if !head.same_origin() {
+                    return json(
+                        &mut stream,
+                        403,
+                        &serde_json::json!({ "error": "cross-origin request refused" }),
+                    );
+                }
                 let Some(rest) = path.strip_prefix("/api/previews/") else {
                     return respond(&mut stream, 404, "text/plain", b"not found");
                 };
@@ -352,15 +378,21 @@ fn read_head(stream: &mut TcpStream) -> Result<Head> {
     let mut parts = request.split_whitespace();
     let method = parts.next().unwrap_or_default().to_owned();
     let path = parts.next().unwrap_or("/").to_owned();
-    let host = lines
-        .filter_map(|line| line.split_once(':'))
-        .find(|(key, _)| key.trim().eq_ignore_ascii_case("host"))
-        .map(|(_, value)| value.trim().to_owned())
-        .unwrap_or_default();
+    let mut host = String::new();
+    let mut origin = None;
+    for (key, value) in lines.filter_map(|line| line.split_once(':')) {
+        let key = key.trim();
+        if key.eq_ignore_ascii_case("host") {
+            host = value.trim().to_owned();
+        } else if key.eq_ignore_ascii_case("origin") {
+            origin = Some(value.trim().to_owned());
+        }
+    }
     Ok(Head {
         method,
         path,
         host,
+        origin,
         raw,
     })
 }
@@ -396,6 +428,7 @@ fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8])
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
+        403 => "Forbidden",
         404 => "Not Found",
         503 => "Service Unavailable",
         _ => "Internal Server Error",
@@ -448,6 +481,25 @@ mod tests {
             stopped: None,
             last_error: None,
         }
+    }
+
+    fn head(host: &str, origin: Option<&str>) -> Head {
+        Head {
+            method: "POST".to_owned(),
+            path: "/".to_owned(),
+            host: host.to_owned(),
+            origin: origin.map(str::to_owned),
+            raw: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn refuses_cross_origin_posts() {
+        assert!(head(DOMAIN, None).same_origin());
+        assert!(head(DOMAIN, Some("https://preview.tomagranate.com")).same_origin());
+        assert!(!head(DOMAIN, Some("https://evil.example")).same_origin());
+        assert!(!head(DOMAIN, Some("null")).same_origin());
+        assert!(!head(DOMAIN, Some("https://preview.tomagranate.com.evil.example")).same_origin());
     }
 
     #[test]

@@ -184,8 +184,12 @@ fn install(store: &Store) -> Result<()> {
 
     let exe = env::current_exe()?.canonicalize()?;
     let path = env::var("PATH").unwrap_or_default();
+    // The daemon must read the same state directory as the CLI.
+    let state_home = env::var("XDG_STATE_HOME")
+        .map(|value| format!("Environment=XDG_STATE_HOME={value}\n"))
+        .unwrap_or_default();
     let unit = format!(
-        "[Unit]\nDescription=agents preview daemon\nAfter=network.target\n\n[Service]\nExecStart={} preview serve\nEnvironment=PATH={path}\nRestart=on-failure\nRestartSec=2s\n\n[Install]\nWantedBy=default.target\n",
+        "[Unit]\nDescription=agents preview daemon\nAfter=network.target\n\n[Service]\nExecStart={} preview serve\nEnvironment=PATH={path}\n{state_home}Restart=on-failure\nRestartSec=2s\n\n[Install]\nWantedBy=default.target\n",
         exe.display()
     );
     let dir = env::var_os("XDG_CONFIG_HOME")

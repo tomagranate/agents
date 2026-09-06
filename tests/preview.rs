@@ -89,13 +89,18 @@ impl Daemon {
 
     /// Sends one raw request and returns the whole response.
     fn request(&self, host: &str, method: &str, path: &str) -> String {
+        self.request_with(host, method, path, "")
+    }
+
+    /// Like `request`, with extra header lines (each ending in CRLF).
+    fn request_with(&self, host: &str, method: &str, path: &str, extra: &str) -> String {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
         write!(
             stream,
-            "{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+            "{method} {path} HTTP/1.1\r\nHost: {host}\r\n{extra}Connection: close\r\n\r\n"
         )
         .unwrap();
         let mut response = String::new();
@@ -261,6 +266,30 @@ fn serves_the_index_and_api_on_the_bare_domain() {
 
     let response = daemon.request(DOMAIN, "POST", "/api/previews/alpha/dance");
     assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+}
+
+#[test]
+fn refuses_actions_from_other_origins() {
+    let daemon = daemon();
+    daemon.write_record("alpha", 1, true);
+
+    let response = daemon.request_with(
+        DOMAIN,
+        "POST",
+        "/api/previews/alpha/remove",
+        "Origin: https://evil.example\r\n",
+    );
+    assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+    assert!(daemon.records().join("alpha.json").exists());
+
+    let response = daemon.request_with(
+        DOMAIN,
+        "POST",
+        "/api/previews/alpha/remove",
+        &format!("Origin: https://{DOMAIN}\r\n"),
+    );
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(!daemon.records().join("alpha.json").exists());
 }
 
 #[test]
