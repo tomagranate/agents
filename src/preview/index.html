@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Previews</title>
+  <link rel="preconnect" href="https://rsms.me/" />
+  <link rel="stylesheet" href="https://rsms.me/inter/inter.css" />
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #ffffff;
+      --fg: #18181b;
+      --muted: #52525b;
+      --line: rgb(9 9 11 / 0.1);
+      --well: #f4f4f5;
+      --accent: #0f766e;
+      --accent-fg: #ffffff;
+      --danger: #b91c1c;
+      --ok: #15803d;
+      --ok-bg: rgb(21 128 61 / 0.1);
+      --off-bg: rgb(9 9 11 / 0.06);
+      --err-bg: rgb(185 28 28 / 0.08);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #09090b;
+        --fg: #fafafa;
+        --muted: #a1a1aa;
+        --line: rgb(255 255 255 / 0.12);
+        --well: #18181b;
+        --accent: #2dd4bf;
+        --accent-fg: #052e2b;
+        --danger: #f87171;
+        --ok: #4ade80;
+        --ok-bg: rgb(74 222 128 / 0.12);
+        --off-bg: rgb(255 255 255 / 0.08);
+        --err-bg: rgb(248 113 113 / 0.12);
+      }
+    }
+    * { box-sizing: border-box; }
+    html { -webkit-font-smoothing: antialiased; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: InterVariable, Inter, system-ui, sans-serif;
+      font-feature-settings: "cv02", "cv03", "cv04", "cv11", "ss03";
+      font-size: 1rem;
+      line-height: 1.6;
+    }
+    main { max-width: 64rem; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    header { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; margin-bottom: 1.5rem; }
+    h1 { font-size: 1.5rem; font-weight: 600; letter-spacing: -0.01em; margin: 0; }
+    .hint { color: var(--muted); font-size: 0.9375rem; margin: 0; }
+    ul { list-style: none; margin: 0; padding: 0; }
+    li { display: grid; grid-template-columns: 1fr auto; gap: 0.5rem 1.5rem; padding: 1rem 0; border-top: 1px solid var(--line); align-items: start; }
+    li:first-child { border-top: none; padding-top: 0; }
+    .title { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; min-width: 0; }
+    .title a { font-weight: 600; color: var(--fg); text-decoration: none; }
+    .title a:hover { text-decoration: underline; text-underline-offset: 3px; }
+    .title a.off { color: var(--muted); }
+    .pill { font-size: 0.8125rem; font-weight: 500; padding: 0.05rem 0.55rem; border-radius: 999px; background: var(--off-bg); color: var(--muted); white-space: nowrap; }
+    .pill.on { background: var(--ok-bg); color: var(--ok); }
+    .detail { color: var(--muted); font-size: 0.9375rem; grid-column: 1 / -1; min-width: 0; }
+    .detail code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8125rem; word-break: break-all; }
+    .detail div + div { margin-top: 0.15rem; }
+    .error { grid-column: 1 / -1; background: var(--err-bg); color: var(--danger); border-radius: 6px; padding: 0.5rem 0.75rem; font-size: 0.9375rem; }
+    .actions { display: flex; gap: 0.5rem; flex-wrap: wrap; justify-content: flex-end; }
+    button {
+      font: inherit; font-size: 0.9375rem; font-weight: 500;
+      padding: 0.35rem 0.85rem; border-radius: 8px; cursor: pointer;
+      border: 1px solid var(--line); background: var(--well); color: var(--fg);
+      min-height: 2.25rem;
+    }
+    button:hover { border-color: rgb(9 9 11 / 0.25); }
+    button.primary { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
+    button.primary:hover { filter: brightness(1.08); }
+    button.danger { color: var(--danger); }
+    button:disabled { opacity: 0.5; cursor: progress; }
+    .empty { color: var(--muted); padding: 3rem 0; text-align: center; }
+    @media (max-width: 640px) {
+      main { padding: 1.5rem 1rem 3rem; }
+      li { grid-template-columns: 1fr; }
+      .actions { justify-content: flex-start; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Previews</h1>
+    <p class="hint">Stops after 12 hours idle. Kept for 30 days.</p>
+  </header>
+  <ul id="list" role="list"></ul>
+  <p class="empty" id="empty" hidden>No previews yet. Start one with <code>agents preview start</code>.</p>
+</main>
+<script>
+  const list = document.getElementById("list");
+  const empty = document.getElementById("empty");
+  const busy = new Set();
+
+  function relative(iso) {
+    const seconds = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+    if (seconds < 60) return "just now";
+    const minutes = seconds / 60;
+    if (minutes < 60) return `${Math.round(minutes)} min ago`;
+    const hours = minutes / 60;
+    if (hours < 48) return `${Math.round(hours)} h ago`;
+    return `${Math.round(hours / 24)} d ago`;
+  }
+
+  function reason(preview) {
+    if (preview.active) return "Running";
+    const why = { idle: "Stopped, idle", stopped: "Stopped", failed: "Failed to start", exited: "Exited" };
+    return why[preview.stopped?.reason] ?? "Stopped";
+  }
+
+  function el(tag, attrs = {}, children = []) {
+    const node = document.createElement(tag);
+    for (const [key, value] of Object.entries(attrs)) {
+      if (key === "class") node.className = value;
+      else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
+      else node.setAttribute(key, value);
+    }
+    for (const child of children) node.append(child);
+    return node;
+  }
+
+  function row(preview) {
+    const name = preview.name;
+    const active = preview.active;
+    const link = el("a", { href: preview.url, class: active ? "" : "off", target: "_blank", rel: "noopener" }, [name]);
+    const pill = el("span", { class: `pill ${active ? "on" : ""}` }, [reason(preview)]);
+    const used = el("span", { class: "pill" }, [
+      active ? `used ${relative(preview.last_used_at)}` : `last used ${relative(preview.last_used_at)}`,
+    ]);
+    const actions = el("div", { class: "actions" });
+    const act = (action, label, cls) =>
+      el("button", { class: cls, type: "button", onclick: () => run(name, action) }, [label]);
+    if (active) actions.append(act("stop", "Stop", ""));
+    else actions.append(act("revive", "Revive", "primary"));
+    actions.append(act("remove", "Remove", "danger"));
+
+    const detail = el("div", { class: "detail" }, [
+      el("div", {}, [el("code", {}, [preview.command.join(" ")])]),
+      el("div", {}, [el("code", {}, [preview.cwd])]),
+    ]);
+    const children = [el("div", { class: "title" }, [link, pill, used]), actions, detail];
+    if (preview.last_error) children.push(el("div", { class: "error" }, [preview.last_error]));
+    const item = el("li", { "data-name": name }, children);
+    if (busy.has(name)) item.querySelectorAll("button").forEach((b) => (b.disabled = true));
+    return item;
+  }
+
+  async function refresh() {
+    try {
+      const response = await fetch("/api/previews", { cache: "no-store" });
+      const { previews } = await response.json();
+      list.replaceChildren(...previews.map(row));
+      empty.hidden = previews.length > 0;
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
+  async function run(name, action) {
+    if (action === "remove" && !confirm(`Remove ${name}? This forgets the preview.`)) return;
+    busy.add(name);
+    document.querySelectorAll(`li[data-name="${name}"] button`).forEach((b) => (b.disabled = true));
+    try {
+      const response = await fetch(`/api/previews/${name}/${action}`, { method: "POST" });
+      const body = await response.json();
+      if (!response.ok) alert(body.error ?? `${action} failed`);
+    } catch (error) {
+      alert(`${action} failed: ${error.message}`);
+    } finally {
+      busy.delete(name);
+      refresh();
+    }
+  }
+
+  refresh();
+  setInterval(refresh, 10_000);
+</script>
+</body>
+</html>

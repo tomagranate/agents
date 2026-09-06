@@ -77,7 +77,7 @@ enum Command {
     Update(updater::UpdateArgs),
     /// Grant sudo and 1Password tickets on a machine.
     Sudo(sudo::SudoArgs),
-    /// Run expiring development previews through Tailscale.
+    /// Run development previews at <name>.preview.tomagranate.com.
     Preview {
         #[command(subcommand)]
         command: preview::PreviewCommand,
@@ -154,7 +154,7 @@ fn run() -> Result<()> {
         Command::Media(args) => plans::run_media(&paths, args),
         Command::Update(args) => updater::run(args),
         Command::Sudo(args) => sudo::run(args),
-        Command::Preview { command } => preview::run(command),
+        Command::Preview { command } => preview::run(&paths, command),
         Command::ShellCheck => background::shell_check(&paths),
         Command::RefreshUpdates => background::refresh(&paths),
     }

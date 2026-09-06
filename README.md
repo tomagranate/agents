@@ -139,19 +139,27 @@ Use the 1Password app to revoke it immediately.
 
 ## Development previews
 
-`agents preview` keeps a development server alive through a systemd user service and exposes it through Tailscale HTTPS. Previews expire after 12 hours by default.
+`agents preview` runs a development server as a systemd user service on tombook-linux and serves it at `https://<name>.preview.tomagranate.com/`. The index at `https://preview.tomagranate.com/` lists every preview and can revive, stop, or remove one. Both are reachable only on the tailnet.
 
 ```sh
 agents preview start worldforge-crm --port 43131 -- corepack pnpm dev
 agents preview status worldforge-crm
-agents preview extend worldforge-crm 12h
 agents preview stop worldforge-crm
-agents preview prune
+agents preview revive worldforge-crm
+agents preview rm worldforge-crm
 ```
 
-Starting the same name replaces the existing process and route. `extend` restarts the process with a fresh lease. `stop` removes the process, route, and local metadata.
+Starting the same name replaces the existing process. A preview stops after 12 hours without a request; use `--idle` to change that. A stopped preview keeps its record for 30 days so one click brings it back. `rm` forgets it.
 
-The development server must serve HTTP and HMR WebSockets through the same local port. This command currently requires Linux, systemd, and Tailscale.
+The development server must serve HTTP and HMR WebSockets through the same local port. The command exports `PORT` to the server.
+
+`agents preview serve` is the daemon behind the index. Caddy sends both hosts to it on `127.0.0.1:8770`. It proxies each preview host to its port and stops idle previews. Install it once, and again after `agents update`:
+
+```sh
+agents preview install
+```
+
+Previews require Linux and systemd. The Caddy and DNS setup lives in the `agents-infra` repository.
 
 ## Agents archive
 
