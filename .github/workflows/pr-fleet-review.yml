@@ -11,7 +11,7 @@ on:
       model:
         description: Model pool override
         required: false
-        default: opencode-go/deepseek-v4.1-flash,opencode-go/glm-5.3-flash
+        default: opencode-go/deepseek-v4.1-flash,opencode-go/deepseek-v4-flash,opencode-go/glm-5.3-flash
 
 concurrency:
   group: fleet-review-${{ github.event.pull_request.number || inputs.pr-number }}
@@ -25,9 +25,9 @@ permissions:
 
 jobs:
   review:
-    uses: tomagranate/primer/.github/workflows/fleet-review.yml@5598a837796ebc294cf2f00fa29eb78e9dc1a002
+    uses: tomagranate/primer/.github/workflows/fleet-review.yml@5ca4dc93f7a60d088987b3f5099cc2157f3496a2
     secrets:
       OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
     with:
-      model: ${{ inputs.model || 'opencode-go/deepseek-v4.1-flash,opencode-go/glm-5.3-flash' }}
+      model: ${{ inputs.model || 'opencode-go/deepseek-v4.1-flash,opencode-go/deepseek-v4-flash,opencode-go/glm-5.3-flash' }}
       pr-number: ${{ inputs.pr-number || '' }}
