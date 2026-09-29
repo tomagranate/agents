@@ -858,35 +858,150 @@ fn captures_native_settings_changes_and_reports_conflicts() {
         ));
 }
 
+/// Runs git in `dir` with a fixed identity and commit date, and asserts success.
+fn git_at(dir: &Path, date: &str, args: &[&str]) {
+    let status = StdCommand::new("git")
+        .args([
+            "-c",
+            "user.name=Agents Test",
+            "-c",
+            "user.email=agents@example.test",
+        ])
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_AUTHOR_DATE", date)
+        .env("GIT_COMMITTER_DATE", date)
+        .status()
+        .unwrap();
+    assert!(status.success(), "git {args:?} failed");
+}
+
+/// Makes a bare remote with a local clone at `clone`, then pushes a remote
+/// commit dated `date` from a second clone and fetches it into `clone`.
+fn clone_behind_remote(root: &Path, name: &str, clone: &Path, date: &str) {
+    let now = "2026-01-01T00:00:00Z";
+    let remote = root.join(format!("{name}.git"));
+    let writer = root.join(format!("{name}-writer"));
+    git_at(
+        root,
+        now,
+        &[
+            "init",
+            "--quiet",
+            "--bare",
+            "-b",
+            "master",
+            remote.to_str().unwrap(),
+        ],
+    );
+    git_at(
+        root,
+        now,
+        &[
+            "clone",
+            "--quiet",
+            remote.to_str().unwrap(),
+            writer.to_str().unwrap(),
+        ],
+    );
+    git_at(
+        &writer,
+        now,
+        &["commit", "--quiet", "--allow-empty", "-m", "first"],
+    );
+    git_at(&writer, now, &["push", "--quiet", "origin", "master"]);
+    git_at(
+        root,
+        now,
+        &[
+            "clone",
+            "--quiet",
+            remote.to_str().unwrap(),
+            clone.to_str().unwrap(),
+        ],
+    );
+    git_at(
+        &writer,
+        date,
+        &["commit", "--quiet", "--allow-empty", "-m", "second"],
+    );
+    git_at(&writer, date, &["push", "--quiet", "origin", "master"]);
+    git_at(clone, now, &["fetch", "--quiet", "origin"]);
+}
+
 #[test]
-fn shell_check_uses_cached_state_without_waiting_for_network() {
+fn shell_check_notices_reflect_local_state() {
     let temporary = TempDir::new().unwrap();
-    let state = temporary.path().join(".state/agents");
+    let root = temporary.path();
+    let state = root.join(".state/agents");
     fs::create_dir_all(&state).unwrap();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
+    let write_state = |latest: &str| {
+        fs::write(
+            state.join("update-check.json"),
+            serde_json::to_vec(&json!({"checked_at": now, "latest_cli": latest})).unwrap(),
+        )
+        .unwrap();
+    };
+
+    let archive = root.join("archive");
+    clone_behind_remote(root, "home", &root.join(".agents"), "2026-01-01T00:00:00Z");
+    clone_behind_remote(
+        root,
+        "archive",
+        &archive,
+        &format!("@{}", now - 60 * 24 * 60 * 60),
+    );
+    fs::create_dir_all(root.join(".config/agents")).unwrap();
     fs::write(
-        state.join("update-check.json"),
-        serde_json::to_vec(&json!({
-            "checked_at": now,
-            "latest_cli": "9.0.0",
-            "agents_home_behind": 1,
-            "archive_behind": 2
-        }))
-        .unwrap(),
+        root.join(".config/agents/archive.toml"),
+        format!("repo_path = {:?}\n", archive.to_str().unwrap()),
     )
     .unwrap();
-    agents(temporary.path())
+
+    write_state("9.0.0");
+    agents(root)
         .arg("_shell-check")
         .assert()
         .success()
         .stderr(predicate::str::contains("CLI 9.0.0 is available"))
         .stderr(predicate::str::contains("agents-home has remote changes"))
-        .stderr(predicate::str::contains(
-            "agents archive has remote changes",
-        ));
+        .stderr(predicate::str::contains("archive is over 30 days behind"));
+
+    // After an update and a pull, the same cached state prints nothing.
+    write_state(env!("CARGO_PKG_VERSION"));
+    git_at(
+        &root.join(".agents"),
+        "2026-01-01T00:00:00Z",
+        &["merge", "--quiet", "--ff-only"],
+    );
+    git_at(
+        &archive,
+        "2026-01-01T00:00:00Z",
+        &["merge", "--quiet", "--ff-only"],
+    );
+    agents(root)
+        .arg("_shell-check")
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty());
+
+    // A recent archive commit alone does not earn a notice.
+    let recent = root.join("recent");
+    clone_behind_remote(root, "recent", &recent, &format!("@{}", now - 60 * 60));
+    fs::write(
+        root.join(".config/agents/archive.toml"),
+        format!("repo_path = {:?}\n", recent.to_str().unwrap()),
+    )
+    .unwrap();
+    agents(root)
+        .arg("_shell-check")
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty());
 }
 
 #[test]

@@ -13,13 +13,16 @@ use serde::{Deserialize, Serialize};
 use crate::{config::Paths, updater, util};
 
 const MAX_AGE: Duration = Duration::from_secs(6 * 60 * 60);
+/// The archive only earns a shell notice when its oldest unpulled commit is this old.
+const ARCHIVE_NOTICE_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
+/// Cached result of the network checks. Repository status is not cached: the
+/// refresh fetches remote-tracking refs, and the shell check compares them to
+/// HEAD locally, so a sync or pull clears its notice right away.
 #[derive(Default, Serialize, Deserialize)]
 struct UpdateState {
     checked_at: u64,
     latest_cli: Option<String>,
-    agents_home_behind: Option<usize>,
-    archive_behind: Option<usize>,
 }
 
 pub fn shell_check(paths: &Paths) -> Result<()> {
@@ -27,9 +30,7 @@ pub fn shell_check(paths: &Paths) -> Result<()> {
     let state = fs::read(&state_path)
         .ok()
         .and_then(|contents| serde_json::from_slice::<UpdateState>(&contents).ok());
-    if let Some(state) = &state {
-        print_notices(state);
-    }
+    print_notices(paths, state.as_ref());
 
     let stale = state
         .as_ref()
@@ -59,28 +60,22 @@ pub fn refresh(paths: &Paths) -> Result<()> {
         return Ok(());
     }
 
-    let current = Version::parse(env!("CARGO_PKG_VERSION"))?;
     let archive = archive_path(paths);
-    let (latest_cli, agents_home_behind, archive_behind) = thread::scope(|scope| {
+    let latest_cli = thread::scope(|scope| {
         let cli = scope.spawn(|| {
             updater::latest_version()
                 .ok()
-                .filter(|latest| latest > &current)
                 .map(|latest| latest.to_string())
         });
-        let home = scope.spawn(|| repository_behind(&paths.agents_home));
-        let archive = scope.spawn(|| archive.and_then(|path| repository_behind(&path)));
-        (
-            cli.join().unwrap_or(None),
-            home.join().unwrap_or(None),
-            archive.join().unwrap_or(None),
-        )
+        scope.spawn(|| fetch(&paths.agents_home));
+        if let Some(archive) = &archive {
+            scope.spawn(|| fetch(archive));
+        }
+        cli.join().unwrap_or(None)
     });
     let state = UpdateState {
         checked_at: now(),
         latest_cli,
-        agents_home_behind,
-        archive_behind,
     };
     util::atomic_write(
         &paths.state_dir.join("update-check.json"),
@@ -89,15 +84,23 @@ pub fn refresh(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-fn print_notices(state: &UpdateState) {
-    if let Some(version) = &state.latest_cli {
+fn print_notices(paths: &Paths, state: Option<&UpdateState>) {
+    let current = Version::parse(env!("CARGO_PKG_VERSION")).ok();
+    let newer_cli = state
+        .and_then(|state| state.latest_cli.as_deref())
+        .and_then(|latest| Version::parse(latest).ok())
+        .filter(|latest| current.as_ref().is_some_and(|current| latest > current));
+    if let Some(version) = newer_cli {
         eprintln!("agents: CLI {version} is available. Run `agents update`.");
     }
-    if state.agents_home_behind.is_some_and(|count| count > 0) {
+    if oldest_unpulled_commit(&paths.agents_home).is_some() {
         eprintln!("agents: agents-home has remote changes. Run `agents sync`.");
     }
-    if state.archive_behind.is_some_and(|count| count > 0) {
-        eprintln!("agents: the agents archive has remote changes. Run `agents archive sync`.");
+    let archive_stale = archive_path(paths)
+        .and_then(|archive| oldest_unpulled_commit(&archive))
+        .is_some_and(|time| now().saturating_sub(time) > ARCHIVE_NOTICE_AGE.as_secs());
+    if archive_stale {
+        eprintln!("agents: the agents archive is over 30 days behind. Run `agents archive sync`.");
     }
 }
 
@@ -110,20 +113,24 @@ fn archive_path(paths: &Paths) -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
 }
 
-fn repository_behind(repo: &std::path::Path) -> Option<usize> {
+fn fetch(repo: &std::path::Path) {
+    if repo.join(".git").is_dir() {
+        let _ = Command::new("git")
+            .args(["fetch", "--quiet", "--prune", "origin"])
+            .current_dir(repo)
+            .status();
+    }
+}
+
+/// Returns the commit time of the oldest upstream commit missing from HEAD.
+/// Reads only local refs, so it is cheap enough for every shell startup.
+fn oldest_unpulled_commit(repo: &std::path::Path) -> Option<u64> {
     if !repo.join(".git").is_dir() {
         return None;
     }
-    let fetch = Command::new("git")
-        .args(["fetch", "--quiet", "--prune", "origin"])
-        .current_dir(repo)
-        .status()
-        .ok()?;
-    if !fetch.success() {
-        return None;
-    }
-    let upstream = git_text(repo, &["rev-parse", "--abbrev-ref", "@{upstream}"])?;
-    git_text(repo, &["rev-list", "--count", &format!("HEAD..{upstream}")])?
+    git_text(repo, &["log", "--format=%ct", "HEAD..@{upstream}"])?
+        .lines()
+        .last()?
         .parse()
         .ok()
 }
