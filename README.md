@@ -351,7 +351,7 @@ agents update
 agents upgrade
 ```
 
-Primer can run the hidden shell update check at startup. It reads cached state immediately and refreshes stale state in a detached process. The check reports CLI, agents-home, and archive updates without delaying the shell.
+Primer can run the hidden shell update check at startup. It reads the cached CLI version and compares local git refs, then refreshes stale state in a detached process. The check takes a few milliseconds. It reports CLI and agents-home updates, and archive updates more than 30 days old.
 
 For Homebrew installations, the command uses `brew upgrade agents`.
 
