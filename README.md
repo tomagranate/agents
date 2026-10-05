@@ -82,6 +82,8 @@ agents preview list
 
 Shared content applies to every harness. Harness content applies only to its named harness. A harness-specific skill replaces a shared skill with the same name.
 
+`agents sync` links managed skills to their effective source. It saves existing local copies under the harness skill directory’s `.agents-backups/` folder before linking. Skills without a managed source stay local.
+
 Settings remain native to each harness. `agents` does not translate settings between harnesses.
 
 Each settings adapter manages a safe set of portable keys. It preserves unmanaged keys in the installed configuration. Authentication, secret environment values, MCP credentials, project trust, and machine state remain local.

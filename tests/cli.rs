@@ -312,6 +312,70 @@ fn write_zip(path: &Path, files: &[(&str, serde_json::Value)]) {
 }
 
 #[test]
+fn sync_replaces_stale_local_skills_and_preserves_backups() {
+    let temporary = TempDir::new().unwrap();
+    let home = temporary.path();
+    agents(home).args(["init", "--no-apply"]).assert().success();
+    let source = home.join(".agents/shared/skills/orchestrate");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("SKILL.md"), "# Current instructions\n").unwrap();
+    fs::write(source.join("models.toml"), "current catalog\n").unwrap();
+
+    // Both matching instructions and changed instructions used to block updates.
+    for (harness, instructions) in [
+        ("codex", "# Current instructions\n"),
+        ("claude", "# Old local instructions\n"),
+    ] {
+        let local = home.join(format!(".{harness}/skills/orchestrate"));
+        fs::create_dir_all(&local).unwrap();
+        fs::write(local.join("SKILL.md"), instructions).unwrap();
+        fs::write(local.join("models.toml"), "stale catalog\n").unwrap();
+        fs::write(local.join("local-note.txt"), "keep this\n").unwrap();
+    }
+    let unmanaged = home.join(".codex/skills/local-only");
+    fs::create_dir_all(&unmanaged).unwrap();
+    fs::write(unmanaged.join("SKILL.md"), "# Local only\n").unwrap();
+
+    agents(home).arg("sync").assert().success();
+    for harness in ["codex", "claude"] {
+        let root = home.join(format!(".{harness}/skills"));
+        let active = root.join("orchestrate");
+        assert_eq!(fs::read_link(&active).unwrap(), source);
+        assert_eq!(
+            fs::read_to_string(active.join("models.toml")).unwrap(),
+            "current catalog\n"
+        );
+        let backups = fs::read_dir(root.join(".agents-backups"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(backups.len(), 1);
+        let backup = backups[0].join("orchestrate");
+        assert_eq!(
+            fs::read_to_string(backup.join("models.toml")).unwrap(),
+            "stale catalog\n"
+        );
+        assert_eq!(
+            fs::read_to_string(backup.join("local-note.txt")).unwrap(),
+            "keep this\n"
+        );
+    }
+    assert!(!unmanaged.is_symlink());
+    fs::write(source.join("models.toml"), "next catalog\n").unwrap();
+    agents(home).arg("sync").assert().success();
+    assert_eq!(
+        fs::read_to_string(home.join(".codex/skills/orchestrate/models.toml")).unwrap(),
+        "next catalog\n"
+    );
+    assert_eq!(
+        fs::read_dir(home.join(".codex/skills/.agents-backups"))
+            .unwrap()
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn supports_scoped_content_and_public_commands() {
     let temporary = TempDir::new().unwrap();
     agents(temporary.path())
