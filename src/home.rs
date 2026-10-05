@@ -396,17 +396,24 @@ fn link_skill(paths: &Paths, source: &Path, name: &str, destination_root: &Path)
                 destination.display()
             );
         }
-        let local = destination.join("SKILL.md");
-        let managed = source.join("SKILL.md");
-        if fs::read(&local).ok() == fs::read(&managed).ok() {
-            println!("  skip {} (local copy is identical)", destination.display());
-        } else {
-            println!(
-                "  conflict {} (local skill remains in place)",
-                destination.display()
-            );
-        }
-        return Ok(());
+        // Preserve local files before making agents-home the active source.
+        let backup = destination_root
+            .join(".agents-backups")
+            .join(uuid::Uuid::new_v4().to_string())
+            .join(name);
+        fs::create_dir_all(backup.parent().context("skill backup has no parent")?)?;
+        fs::rename(&destination, &backup).with_context(|| {
+            format!(
+                "could not back up {} to {}",
+                destination.display(),
+                backup.display()
+            )
+        })?;
+        println!(
+            "  backed up {} -> {}",
+            destination.display(),
+            backup.display()
+        );
     }
     #[cfg(unix)]
     std::os::unix::fs::symlink(source, &destination)?;
