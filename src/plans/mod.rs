@@ -79,6 +79,10 @@ pub struct UploadArgs {
     /// Replace the content of one plan.
     #[arg(long)]
     replace: Option<String>,
+    /// Upload a prototype for a plan to embed with <plan-prototype>. It is
+    /// served at the root of its own origin, and the command prints that URL.
+    #[arg(long)]
+    prototype: bool,
 }
 
 #[derive(Debug, Args)]
@@ -199,6 +203,7 @@ pub fn run(paths: &Paths, args: PlansArgs) -> Result<()> {
                     title: args.title,
                     entry: args.entry,
                     replace: args.replace,
+                    prototype: args.prototype,
                 },
             )?;
             println!("{url}");

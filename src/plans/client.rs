@@ -31,6 +31,9 @@ pub struct Plan {
     pub updated_at: String,
     #[serde(default)]
     pub files: Vec<PlanFile>,
+    /// Set for prototypes: the root of the prototype's own origin.
+    #[serde(default)]
+    pub prototype_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -206,7 +209,10 @@ impl Client {
         format!("{}{}", self.endpoint, path)
     }
 
+    /// Every API request goes through here. The Worker rejects writes without
+    /// `X-Plans-Client`, so pages on other origins cannot write through Caddy.
     fn authorize(&self, builder: RequestBuilder) -> RequestBuilder {
+        let builder = builder.header("X-Plans-Client", "1");
         match &self.token {
             Some(token) => builder.bearer_auth(token),
             None => builder,

@@ -187,11 +187,25 @@ fn proxies_by_host_and_reports_missing_or_stopped_previews() {
 
     let response = daemon.request(&format!("sleepy.{DOMAIN}"), "GET", "/");
     assert!(response.starts_with("HTTP/1.1 503"), "{response}");
-    assert!(response.contains("Revive it from the index"), "{response}");
+    assert!(response.contains("This preview is stopped"), "{response}");
+    assert!(response.contains("/__preview/revive"), "{response}");
+
+    // The revive path refuses other origins, so a page elsewhere cannot
+    // start a preview. Only a stopped preview takes the path at all.
+    let response = daemon.request_with(
+        &format!("sleepy.{DOMAIN}"),
+        "POST",
+        "/__preview/revive",
+        "Origin: https://evil.example\r\n",
+    );
+    assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+    let response = daemon.request(&format!("alpha.{DOMAIN}"), "POST", "/__preview/revive");
+    assert!(response.ends_with("hello from alpha"), "{response}");
 
     let response = daemon.request(&format!("dead.{DOMAIN}"), "GET", "/");
     assert!(response.starts_with("HTTP/1.1 503"), "{response}");
-    assert!(response.contains("not answering"), "{response}");
+    assert!(response.contains("The preview is starting"), "{response}");
+    assert!(response.contains("http-equiv=\"refresh\""), "{response}");
 }
 
 #[test]

@@ -1733,6 +1733,8 @@ struct RequestData {
     method: String,
     path: String,
     body: Vec<u8>,
+    /// The `X-Plans-Client` header. The Worker rejects writes without it.
+    client: Option<String>,
 }
 
 struct MockServer {
@@ -1761,6 +1763,11 @@ fn mock_server(status: u16, body: &'static str, headers: &[(&str, &str)]) -> Moc
         };
         let method = request.method().to_string();
         let path = request.url().to_owned();
+        let client = request
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv("X-Plans-Client"))
+            .map(|header| header.value.to_string());
         let mut request_body = Vec::new();
         request
             .as_reader()
@@ -1777,6 +1784,7 @@ fn mock_server(status: u16, body: &'static str, headers: &[(&str, &str)]) -> Moc
                 method,
                 path,
                 body: request_body,
+                client,
             })
             .expect("record mock request");
     });
@@ -1821,6 +1829,48 @@ fn plans_upload_posts_multipart_and_prints_the_plan_url() {
     assert!(body.contains("<h1>Ship it</h1>"));
     assert!(body.contains("name=\"project\""));
     assert!(body.contains("agents"));
+    assert!(!body.contains("name=\"kind\""));
+    assert_eq!(request.client.as_deref(), Some("1"));
+}
+
+#[test]
+fn plans_upload_prototype_sends_the_kind_and_prints_the_prototype_url() {
+    let home = TempDir::new().unwrap();
+    let dist = home.path().join("dist");
+    fs::create_dir_all(dist.join("assets")).unwrap();
+    fs::write(
+        dist.join("index.html"),
+        "<script src=\"/assets/app.js\"></script>",
+    )
+    .unwrap();
+    fs::write(dist.join("assets/app.js"), "console.log(1)").unwrap();
+    fs::write(dist.join("assets/font.woff2"), "font").unwrap();
+    let server = mock_server(
+        201,
+        r#"{"plan":{"id":"01PROTO","title":"Proto","prototype_url":"https://01proto.plans.tomagranate.com/"}}"#,
+        &[("Content-Type", "application/json")],
+    );
+
+    agents(home.path())
+        .args([
+            "plans",
+            "upload",
+            dist.to_str().unwrap(),
+            "--prototype",
+            "--no-project",
+            "--endpoint",
+            &server.endpoint,
+        ])
+        .assert()
+        .success()
+        .stdout("https://01proto.plans.tomagranate.com/\n");
+
+    let request = server.request.recv().unwrap();
+    let body = String::from_utf8_lossy(&request.body);
+    assert!(body.contains("name=\"kind\"\r\n\r\nprototype"));
+    assert!(body.contains("filename=\"assets/app.js\""));
+    assert!(body.contains("Content-Type: font/woff2"));
+    assert_eq!(request.client.as_deref(), Some("1"));
 }
 
 #[test]

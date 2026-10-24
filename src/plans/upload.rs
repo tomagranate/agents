@@ -18,6 +18,8 @@ pub struct UploadOptions {
     pub title: Option<String>,
     pub entry: String,
     pub replace: Option<String>,
+    /// Upload a prototype instead of a plan document.
+    pub prototype: bool,
 }
 
 struct UploadFile {
@@ -41,6 +43,9 @@ pub fn upload(client: &Client, options: UploadOptions) -> Result<String> {
     if let Some(replace) = options.replace {
         form = form.text("replace", replace);
     }
+    if options.prototype {
+        form = form.text("kind", "prototype");
+    }
 
     for file in files {
         let part = multipart::Part::bytes(file.contents)
@@ -56,6 +61,12 @@ pub fn upload(client: &Client, options: UploadOptions) -> Result<String> {
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
     let body: PlanResponse = client.json(response)?;
+    if options.prototype {
+        return body
+            .plan
+            .prototype_url
+            .context("the plans service did not return a prototype URL; it may be out of date");
+    }
     let location = header_location.or(body.location);
 
     Ok(location
@@ -210,6 +221,18 @@ fn content_type(path: &str) -> &'static str {
         "gif" => "image/gif",
         "webp" => "image/webp",
         "avif" => "image/avif",
+        "ico" => "image/x-icon",
+        "mjs" => "text/javascript",
+        "map" => "application/json",
+        "webmanifest" => "application/manifest+json",
+        "wasm" => "application/wasm",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
+        "mp3" => "audio/mpeg",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
         _ => "application/octet-stream",
     }
 }
