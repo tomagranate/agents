@@ -151,7 +151,7 @@ agents preview revive worldforge-crm
 agents preview rm worldforge-crm
 ```
 
-Starting the same name replaces the existing process. A preview stops after 12 hours without a request; use `--idle` to change that. A stopped preview keeps its record for 30 days so one click brings it back. `rm` forgets it.
+Starting the same name replaces the existing process. A preview stops after 12 hours without a request; use `--idle` to change that. A stopped preview keeps its record for 30 days so one click brings it back. The preview host itself shows a **Revive** button while it is stopped, so a preview that a plan embeds can be revived in place. `rm` forgets it.
 
 The development server must serve HTTP and HMR WebSockets through the same local port. The command exports `PORT` to the server.
 
@@ -321,6 +321,12 @@ agents plans projects
 
 Uploads take one HTML file or one directory. Directory uploads use `index.html` as the entry file.
 Use `--entry` to name a different entry file. Use `--replace <id>` to overwrite the content of one plan.
+
+Use `--prototype` to upload a prototype that a plan embeds. The command prints the prototype URL, `https://<id>.plans.tomagranate.com/`. The prototype is the root of its own origin, so a normal build with absolute asset paths works. Prototypes stay out of `ls` and `search`. Embed one in a plan with `<plan-prototype src="<url>" title="…"></plan-prototype>`; the `plan` skill describes the tag.
+
+```sh
+agents plans upload ./dist --prototype --title "PDF search"
+```
 
 The command infers the project from the Git remote, or from the current directory name.
 Use `--project <slug>` to name the project. Use `--no-project` to store the plan without one.

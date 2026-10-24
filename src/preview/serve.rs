@@ -198,12 +198,7 @@ impl Daemon {
             );
         };
         if !record.is_running() {
-            return respond(
-                &mut client,
-                503,
-                "text/html; charset=utf-8",
-                notice(name, "This preview is stopped. Revive it from the index.").as_bytes(),
-            );
+            return self.stopped(client, head, name);
         }
         let mut upstream = match TcpStream::connect(("127.0.0.1", record.port)) {
             Ok(upstream) => upstream,
@@ -212,7 +207,7 @@ impl Daemon {
                     &mut client,
                     503,
                     "text/html; charset=utf-8",
-                    notice(name, "The preview is not answering on its port yet.").as_bytes(),
+                    starting(name).as_bytes(),
                 );
             }
         };
@@ -220,6 +215,42 @@ impl Daemon {
         upstream.write_all(&head.raw)?;
         pipe(client, upstream);
         Ok(())
+    }
+
+    /// A stopped preview host shows a Revive button, so a preview that is
+    /// embedded in a plan can be revived from its own frame. The button posts
+    /// to `REVIVE_PATH` on the same host. The path is only taken while the
+    /// preview is stopped; a running preview gets every path proxied.
+    fn stopped(&self, mut client: TcpStream, head: Head, name: &str) -> Result<()> {
+        let path = head.path.split('?').next().unwrap_or("/");
+        if head.method != "POST" || path != REVIVE_PATH {
+            return respond(
+                &mut client,
+                503,
+                "text/html; charset=utf-8",
+                stopped_page(name).as_bytes(),
+            );
+        }
+        if !head.same_origin() {
+            return json(
+                &mut client,
+                403,
+                &serde_json::json!({ "error": "cross-origin request refused" }),
+            );
+        }
+        match self.action(name, "revive") {
+            Ok(Some(record)) => json(&mut client, 200, &Summary::from(record)),
+            Ok(None) => json(
+                &mut client,
+                404,
+                &serde_json::json!({ "error": "no preview" }),
+            ),
+            Err(error) => json(
+                &mut client,
+                status_for(&error),
+                &serde_json::json!({ "error": format!("{error:#}") }),
+            ),
+        }
     }
 
     /// Records use, at most once per `TOUCH_INTERVAL` per preview.
@@ -453,11 +484,36 @@ fn json<T: Serialize>(stream: &mut TcpStream, status: u16, value: &T) -> Result<
     )
 }
 
-/// A small page for a preview host that cannot be served.
-fn notice(name: &str, message: &str) -> String {
+/// The stopped page posts here to revive the preview.
+const REVIVE_PATH: &str = "/__preview/revive";
+
+/// A small page for a preview host that cannot be served. `head` and `body`
+/// are extra HTML for the head and for after the message.
+fn page(name: &str, message: &str, head: &str, body: &str) -> String {
     format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{name} preview</title><style>:root{{color-scheme:light dark}}body{{font-family:system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1.25rem;line-height:1.6}}</style></head><body><h1>{name}</h1><p>{message}</p><p><a href=\"https://{DOMAIN}/\">Open the preview index</a></p></body></html>"
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">{head}<title>{name} preview</title><style>:root{{color-scheme:light dark}}body{{font-family:system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1.25rem;line-height:1.6}}button{{font:inherit;padding:.4rem .9rem;border-radius:6px;border:0;background:#18181b;color:#fff;cursor:pointer}}@media(prefers-color-scheme:dark){{button{{background:#fff;color:#18181b}}}}</style></head><body><h1>{name}</h1><p>{message}</p>{body}<p><a href=\"https://{DOMAIN}/\" target=\"_blank\" rel=\"noopener\">Open the preview index</a></p></body></html>"
     )
+}
+
+fn notice(name: &str, message: &str) -> String {
+    page(name, message, "", "")
+}
+
+/// Reloads itself until the dev server answers.
+fn starting(name: &str) -> String {
+    page(
+        name,
+        "The preview is starting. This page reloads until it answers.",
+        "<meta http-equiv=\"refresh\" content=\"2\">",
+        "",
+    )
+}
+
+fn stopped_page(name: &str) -> String {
+    let script = format!(
+        "<p><button id=\"revive\" type=\"button\">Revive</button> <span id=\"status\" role=\"status\"></span></p><script>document.getElementById('revive').onclick=async function(){{this.disabled=true;var s=document.getElementById('status');s.textContent='Reviving...';try{{var r=await fetch('{REVIVE_PATH}',{{method:'POST'}});if(!r.ok)throw new Error((await r.json()).error||r.status);location.reload()}}catch(e){{s.textContent='Revive failed: '+e.message;this.disabled=false}}}}</script>"
+    );
+    page(name, "This preview is stopped.", "", &script)
 }
 
 #[cfg(test)]
