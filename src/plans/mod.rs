@@ -207,6 +207,9 @@ pub fn run(paths: &Paths, args: PlansArgs) -> Result<()> {
                 },
             )?;
             println!("{url}");
+            if args.prototype {
+                upload::warn_if_unresolvable(&url);
+            }
         }
         PlansCommand::Ls(args) => {
             let query = list_query(&args);

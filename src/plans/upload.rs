@@ -1,10 +1,11 @@
 use std::{
     fs,
+    net::ToSocketAddrs,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, bail};
-use reqwest::{blocking::multipart, header::LOCATION};
+use reqwest::{Url, blocking::multipart, header::LOCATION};
 
 use super::client::{Client, PlanResponse};
 
@@ -72,6 +73,24 @@ pub fn upload(client: &Client, options: UploadOptions) -> Result<String> {
     Ok(location
         .map(|location| client.resolve_location(&location))
         .unwrap_or_else(|| client.plan_url(&body.plan.id)))
+}
+
+// Prototype hosts need a wildcard DNS record that lives outside this service.
+// Warn when the host does not resolve, so a missing record is loud. Call it
+// after the URL is printed: a slow resolver must not delay stdout.
+pub fn warn_if_unresolvable(url: &str) {
+    // domain() is None for IP-literal hosts, which need no lookup.
+    let Some(host) = Url::parse(url)
+        .ok()
+        .and_then(|url| url.domain().map(str::to_owned))
+    else {
+        return;
+    };
+    if (host.as_str(), 443).to_socket_addrs().is_err() {
+        eprintln!(
+            "warning: {host} does not resolve. Check the wildcard DNS record for prototype hosts."
+        );
+    }
 }
 
 fn collect_files(path: &Path, entry: &str) -> Result<Vec<UploadFile>> {
