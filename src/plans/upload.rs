@@ -63,12 +63,10 @@ pub fn upload(client: &Client, options: UploadOptions) -> Result<String> {
         .map(str::to_owned);
     let body: PlanResponse = client.json(response)?;
     if options.prototype {
-        let url = body
+        return body
             .plan
             .prototype_url
-            .context("the plans service did not return a prototype URL; it may be out of date")?;
-        warn_if_unresolvable(&url);
-        return Ok(url);
+            .context("the plans service did not return a prototype URL; it may be out of date");
     }
     let location = header_location.or(body.location);
 
@@ -78,11 +76,13 @@ pub fn upload(client: &Client, options: UploadOptions) -> Result<String> {
 }
 
 // Prototype hosts need a wildcard DNS record that lives outside this service.
-// Warn when the host does not resolve, so a missing record is loud.
-fn warn_if_unresolvable(url: &str) {
+// Warn when the host does not resolve, so a missing record is loud. Call it
+// after the URL is printed: a slow resolver must not delay stdout.
+pub fn warn_if_unresolvable(url: &str) {
+    // domain() is None for IP-literal hosts, which need no lookup.
     let Some(host) = Url::parse(url)
         .ok()
-        .and_then(|url| url.host_str().map(str::to_owned))
+        .and_then(|url| url.domain().map(str::to_owned))
     else {
         return;
     };

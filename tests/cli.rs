@@ -1877,7 +1877,7 @@ fn plans_upload_prototype_sends_the_kind_and_prints_the_prototype_url() {
     fs::write(dist.join("assets/font.woff2"), "font").unwrap();
     let server = mock_server(
         201,
-        r#"{"plan":{"id":"01PROTO","title":"Proto","prototype_url":"https://127.0.0.1/"}}"#,
+        r#"{"plan":{"id":"01PROTO","title":"Proto","prototype_url":"https://[::1]/"}}"#,
         &[("Content-Type", "application/json")],
     );
 
@@ -1893,7 +1893,7 @@ fn plans_upload_prototype_sends_the_kind_and_prints_the_prototype_url() {
         ])
         .assert()
         .success()
-        .stdout("https://127.0.0.1/\n")
+        .stdout("https://[::1]/\n")
         .stderr("");
 
     let request = server.request.recv().unwrap();
