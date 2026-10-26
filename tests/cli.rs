@@ -1834,6 +1834,36 @@ fn plans_upload_posts_multipart_and_prints_the_plan_url() {
 }
 
 #[test]
+fn plans_upload_prototype_warns_when_the_host_does_not_resolve() {
+    let home = TempDir::new().unwrap();
+    let file = home.path().join("index.html");
+    fs::write(&file, "<h1>Proto</h1>").unwrap();
+    // .invalid never resolves (RFC 6761).
+    let server = mock_server(
+        201,
+        r#"{"plan":{"id":"01PROTO","title":"Proto","prototype_url":"https://01proto.plans.invalid/"}}"#,
+        &[("Content-Type", "application/json")],
+    );
+
+    agents(home.path())
+        .args([
+            "plans",
+            "upload",
+            file.to_str().unwrap(),
+            "--prototype",
+            "--no-project",
+            "--endpoint",
+            &server.endpoint,
+        ])
+        .assert()
+        .success()
+        .stdout("https://01proto.plans.invalid/\n")
+        .stderr(predicate::str::contains(
+            "warning: 01proto.plans.invalid does not resolve",
+        ));
+}
+
+#[test]
 fn plans_upload_prototype_sends_the_kind_and_prints_the_prototype_url() {
     let home = TempDir::new().unwrap();
     let dist = home.path().join("dist");
@@ -1847,7 +1877,7 @@ fn plans_upload_prototype_sends_the_kind_and_prints_the_prototype_url() {
     fs::write(dist.join("assets/font.woff2"), "font").unwrap();
     let server = mock_server(
         201,
-        r#"{"plan":{"id":"01PROTO","title":"Proto","prototype_url":"https://01proto.plans.tomagranate.com/"}}"#,
+        r#"{"plan":{"id":"01PROTO","title":"Proto","prototype_url":"https://127.0.0.1/"}}"#,
         &[("Content-Type", "application/json")],
     );
 
@@ -1863,7 +1893,8 @@ fn plans_upload_prototype_sends_the_kind_and_prints_the_prototype_url() {
         ])
         .assert()
         .success()
-        .stdout("https://01proto.plans.tomagranate.com/\n");
+        .stdout("https://127.0.0.1/\n")
+        .stderr("");
 
     let request = server.request.recv().unwrap();
     let body = String::from_utf8_lossy(&request.body);

@@ -1,10 +1,11 @@
 use std::{
     fs,
+    net::ToSocketAddrs,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, bail};
-use reqwest::{blocking::multipart, header::LOCATION};
+use reqwest::{Url, blocking::multipart, header::LOCATION};
 
 use super::client::{Client, PlanResponse};
 
@@ -62,16 +63,34 @@ pub fn upload(client: &Client, options: UploadOptions) -> Result<String> {
         .map(str::to_owned);
     let body: PlanResponse = client.json(response)?;
     if options.prototype {
-        return body
+        let url = body
             .plan
             .prototype_url
-            .context("the plans service did not return a prototype URL; it may be out of date");
+            .context("the plans service did not return a prototype URL; it may be out of date")?;
+        warn_if_unresolvable(&url);
+        return Ok(url);
     }
     let location = header_location.or(body.location);
 
     Ok(location
         .map(|location| client.resolve_location(&location))
         .unwrap_or_else(|| client.plan_url(&body.plan.id)))
+}
+
+// Prototype hosts need a wildcard DNS record that lives outside this service.
+// Warn when the host does not resolve, so a missing record is loud.
+fn warn_if_unresolvable(url: &str) {
+    let Some(host) = Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+    else {
+        return;
+    };
+    if (host.as_str(), 443).to_socket_addrs().is_err() {
+        eprintln!(
+            "warning: {host} does not resolve. Check the wildcard DNS record for prototype hosts."
+        );
+    }
 }
 
 fn collect_files(path: &Path, entry: &str) -> Result<Vec<UploadFile>> {
