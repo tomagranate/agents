@@ -13,12 +13,15 @@ const MAX_UPLOAD_BYTES: u64 = 10 * 1024 * 1024;
 
 pub struct UploadOptions {
     pub path: PathBuf,
-    /// None sends no membership fields (keep existing membership on replace).
+    /// None sends no membership fields (keep existing membership on revise).
     /// Some(None) clears membership; Some(Some(slug)) sets it.
     pub project: Option<Option<String>>,
     pub title: Option<String>,
     pub entry: String,
-    pub replace: Option<String>,
+    /// The plan that gets a new revision.
+    pub revise: Option<String>,
+    /// What changed in the revision.
+    pub note: Option<String>,
     /// Upload a prototype instead of a plan document.
     pub prototype: bool,
 }
@@ -41,8 +44,12 @@ pub fn upload(client: &Client, options: UploadOptions) -> Result<String> {
     if let Some(title) = options.title {
         form = form.text("title", title);
     }
-    if let Some(replace) = options.replace {
-        form = form.text("replace", replace);
+    // The service names the plan to revise "replace", from before revisions.
+    if let Some(revise) = options.revise {
+        form = form.text("replace", revise);
+    }
+    if let Some(note) = options.note {
+        form = form.text("note", note);
     }
     if options.prototype {
         form = form.text("kind", "prototype");

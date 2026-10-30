@@ -1970,7 +1970,7 @@ fn plans_upload_rejects_a_missing_entry_and_oversize_input() {
 }
 
 #[test]
-fn plans_upload_replace_keeps_membership_without_project_flags() {
+fn plans_upload_revise_keeps_membership_without_project_flags() {
     let home = TempDir::new().unwrap();
     let project_dir = home.path().join("some-other-repo");
     fs::create_dir(&project_dir).unwrap();
@@ -1987,8 +1987,10 @@ fn plans_upload_replace_keeps_membership_without_project_flags() {
             "plans",
             "upload",
             "plan.html",
-            "--replace",
+            "--revise",
             "01PLAN",
+            "--note",
+            "Cut the rollout to two steps",
             "--endpoint",
             &server.endpoint,
         ])
@@ -1997,9 +1999,29 @@ fn plans_upload_replace_keeps_membership_without_project_flags() {
 
     let request = server.request.recv().unwrap();
     let body = String::from_utf8_lossy(&request.body);
-    assert!(body.contains("name=\"replace\""));
+    assert!(body.contains("name=\"replace\"\r\n\r\n01PLAN"));
+    assert!(body.contains("name=\"note\"\r\n\r\nCut the rollout to two steps"));
     assert!(!body.contains("name=\"project\""));
     assert!(!body.contains("name=\"no_project\""));
+}
+
+#[test]
+fn plans_show_lists_revisions_newest_first() {
+    let home = TempDir::new().unwrap();
+    let server = mock_server(
+        200,
+        r#"{"plan":{"id":"01PLAN","title":"Uploads","revision":2,"revisions":[{"number":2,"note":"Cut the rollout","created_at":"2026-10-30T00:00:00Z"},{"number":1,"note":null,"created_at":"2026-10-29T00:00:00Z"}]}}"#,
+        &[("Content-Type", "application/json")],
+    );
+
+    agents(home.path())
+        .args(["plans", "show", "01PLAN", "--endpoint", &server.endpoint])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Revision: 2\n"))
+        .stdout(predicate::str::contains(
+            "Revisions:\n  2\t2026-10-30T00:00:00Z\tCut the rollout\n  1\t2026-10-29T00:00:00Z\t\n",
+        ));
 }
 
 #[test]
