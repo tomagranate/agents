@@ -356,7 +356,9 @@ fn print_plan(plan: &Plan) {
     println!("Title: {}", plan.title);
     println!("Project: {project}");
     println!("Entry: {}", plan.entry_path);
-    println!("Revision: {}", plan.revision);
+    if let Some(revision) = plan.revision {
+        println!("Revision: {revision}");
+    }
     println!("Created: {}", plan.created_at);
     println!("Updated: {}", plan.updated_at);
     if !plan.files.is_empty() {

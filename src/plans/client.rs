@@ -29,9 +29,9 @@ pub struct Plan {
     pub created_at: String,
     #[serde(default)]
     pub updated_at: String,
-    /// The newest revision's number.
+    /// The newest revision's number. Absent from services older than revisions.
     #[serde(default)]
-    pub revision: u64,
+    pub revision: Option<u64>,
     /// The newest revision's files.
     #[serde(default)]
     pub files: Vec<PlanFile>,
