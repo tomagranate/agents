@@ -320,7 +320,13 @@ agents plans projects
 ```
 
 Uploads take one HTML file or one directory. Directory uploads use `index.html` as the entry file.
-Use `--entry` to name a different entry file. Use `--replace <id>` to overwrite the content of one plan.
+Use `--entry` to name a different entry file.
+
+Use `--revise <id>` to add a new revision to a plan. Add `--note` to say what changed. The plan URL shows the newest revision, and the plans app has a picker for older ones. `agents plans show <id>` lists the revisions. `--replace` is an old name for `--revise`.
+
+```sh
+agents plans upload plan.html --revise 01PLAN --note "Cut the rollout to two steps"
+```
 
 Use `--prototype` to upload a prototype that a plan embeds. The command prints the prototype URL, `https://<id>.plans.tomagranate.com/`. The prototype is the root of its own origin, so a normal build with absolute asset paths works. Prototypes stay out of `ls` and `search`. Embed one in a plan with `<plan-prototype src="<url>" title="…"></plan-prototype>`; the `plan` skill describes the tag.
 

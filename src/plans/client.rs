@@ -29,8 +29,15 @@ pub struct Plan {
     pub created_at: String,
     #[serde(default)]
     pub updated_at: String,
+    /// The newest revision's number. Absent from services older than revisions.
+    #[serde(default)]
+    pub revision: Option<u64>,
+    /// The newest revision's files.
     #[serde(default)]
     pub files: Vec<PlanFile>,
+    /// Newest first. Only `show` returns them.
+    #[serde(default)]
+    pub revisions: Vec<PlanRevision>,
     /// Set for prototypes: the root of the prototype's own origin.
     #[serde(default)]
     pub prototype_url: Option<String>,
@@ -43,6 +50,15 @@ pub struct PlanFile {
     pub content_type: String,
     #[serde(default)]
     pub byte_size: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PlanRevision {
+    pub number: u64,
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(default)]
+    pub created_at: String,
 }
 
 #[derive(Debug, Deserialize)]

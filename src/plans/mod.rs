@@ -76,9 +76,13 @@ pub struct UploadArgs {
     /// Entry file for directory uploads.
     #[arg(long, default_value = "index.html")]
     entry: String,
-    /// Replace the content of one plan.
-    #[arg(long)]
-    replace: Option<String>,
+    /// Add a new revision to an existing plan. Older revisions stay
+    /// viewable, and the plan URL shows the newest one.
+    #[arg(long, value_name = "ID", alias = "replace")]
+    revise: Option<String>,
+    /// Say what changed in this revision.
+    #[arg(long, requires = "revise")]
+    note: Option<String>,
     /// Upload a prototype for a plan to embed with <plan-prototype>. It is
     /// served at the root of its own origin, and the command prints that URL.
     #[arg(long)]
@@ -184,10 +188,10 @@ pub fn run(paths: &Paths, args: PlansArgs) -> Result<()> {
 
     match args.command {
         PlansCommand::Upload(args) => {
-            // --replace overwrites content only. Membership changes on
-            // replace need an explicit --project or --no-project; inferring
-            // one from the current directory would silently move the plan.
-            let project = if args.replace.is_some() && args.project.is_none() && !args.no_project {
+            // --revise adds content only. Membership changes on a revision
+            // need an explicit --project or --no-project; inferring one from
+            // the current directory would silently move the plan.
+            let project = if args.revise.is_some() && args.project.is_none() && !args.no_project {
                 None
             } else {
                 Some(infer_project::selected_project(
@@ -202,7 +206,8 @@ pub fn run(paths: &Paths, args: PlansArgs) -> Result<()> {
                     project,
                     title: args.title,
                     entry: args.entry,
-                    replace: args.replace,
+                    revise: args.revise,
+                    note: args.note,
                     prototype: args.prototype,
                 },
             )?;
@@ -351,6 +356,9 @@ fn print_plan(plan: &Plan) {
     println!("Title: {}", plan.title);
     println!("Project: {project}");
     println!("Entry: {}", plan.entry_path);
+    if let Some(revision) = plan.revision {
+        println!("Revision: {revision}");
+    }
     println!("Created: {}", plan.created_at);
     println!("Updated: {}", plan.updated_at);
     if !plan.files.is_empty() {
@@ -359,6 +367,17 @@ fn print_plan(plan: &Plan) {
             println!(
                 "  {}\t{}\t{} bytes",
                 file.path, file.content_type, file.byte_size
+            );
+        }
+    }
+    if plan.revisions.len() > 1 {
+        println!("Revisions:");
+        for revision in &plan.revisions {
+            println!(
+                "  {}\t{}\t{}",
+                revision.number,
+                revision.created_at,
+                revision.note.as_deref().unwrap_or("")
             );
         }
     }
