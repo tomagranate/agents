@@ -49,6 +49,14 @@ struct GitRef {
 
 pub fn run(args: UpdateArgs) -> Result<()> {
     let current = Version::parse(env!("CARGO_PKG_VERSION"))?;
+    // Homebrew cannot reach the private repo, so say so before any GitHub call.
+    let executable = std::env::current_exe()?.canonicalize()?;
+    if is_homebrew_install(&executable) {
+        bail!(
+            "Homebrew can no longer install agents. \
+             Run `brew uninstall agents`, then `primer update` to install it from Hangar."
+        );
+    }
     let release = fetch_release(args.version.as_deref())?;
     let latest = release_version(&release.tag_name)
         .with_context(|| format!("invalid release version {}", release.tag_name))?;
@@ -61,24 +69,27 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         return Ok(());
     }
 
-    let executable = std::env::current_exe()?.canonicalize()?;
-    if is_homebrew_install(&executable) {
-        bail!(
-            "agents {latest} is out, but Homebrew can no longer install agents. \
-             Run `brew uninstall agents`, then `primer update` to install it from Hangar."
-        );
-    }
-
     install_standalone(&release, &executable)?;
     println!("Updated agents {current} → {latest}.");
     Ok(())
 }
 
 fn fetch_release(version: Option<&str>) -> Result<Release> {
-    let tag = match version {
-        Some(version) => format!("{TAG_PREFIX}{}", version.trim_start_matches('v')),
-        None => newest_tag()?,
-    };
+    if let Some(version) = version {
+        return release(&format!("{TAG_PREFIX}{}", version.trim_start_matches('v')));
+    }
+    // A tag can exist before its release is published. Fall back to the next one.
+    for tag in stable_tags()? {
+        match release(&tag) {
+            Ok(release) => return Ok(release),
+            Err(error) if is_not_found(&error) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    bail!("no published agents release found")
+}
+
+fn release(tag: &str) -> Result<Release> {
     get(&format!(
         "https://api.github.com/repos/{REPOSITORY}/releases/tags/{tag}"
     ))?
@@ -86,26 +97,38 @@ fn fetch_release(version: Option<&str>) -> Result<Release> {
     .context("could not read the GitHub release")
 }
 
-/// Finds the highest agents-vX.Y.Z tag. Hangar also publishes releases for
-/// other packages, so GitHub's "latest release" is not the agents release.
-fn newest_tag() -> Result<String> {
+fn is_not_found(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<reqwest::Error>()
+        .and_then(reqwest::Error::status)
+        .is_some_and(|status| status == reqwest::StatusCode::NOT_FOUND)
+}
+
+/// Lists stable agents-vX.Y.Z tags, newest first. Hangar also publishes
+/// releases for other packages, so GitHub's "latest release" is not used.
+fn stable_tags() -> Result<Vec<String>> {
     let refs: Vec<GitRef> = get(&format!(
         "https://api.github.com/repos/{REPOSITORY}/git/matching-refs/tags/{TAG_PREFIX}"
     ))?
     .json()
     .context("could not read the agents release tags")?;
-    newest(
+    Ok(newest_first(
         refs.iter()
             .filter_map(|r| r.name.strip_prefix("refs/tags/")),
-    )
-    .context("no agents release found")
+    ))
 }
 
-/// Picks the highest version among agents-vX.Y.Z tags and ignores the rest.
-fn newest<'a>(tags: impl Iterator<Item = &'a str>) -> Option<String> {
-    tags.filter_map(|tag| release_version(tag).map(|version| (version, tag)))
-        .max_by(|a, b| a.0.cmp(&b.0))
+/// Keeps stable agents-vX.Y.Z tags only and sorts them newest first.
+fn newest_first<'a>(tags: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut versions: Vec<(Version, &str)> = tags
+        .filter_map(|tag| release_version(tag).map(|version| (version, tag)))
+        .filter(|(version, _)| version.pre.is_empty())
+        .collect();
+    versions.sort_by(|a, b| b.0.cmp(&a.0));
+    versions
+        .into_iter()
         .map(|(_, tag)| tag.to_owned())
+        .collect()
 }
 
 fn release_version(tag: &str) -> Option<Version> {
@@ -113,8 +136,9 @@ fn release_version(tag: &str) -> Option<Version> {
 }
 
 pub(crate) fn latest_version() -> Result<Version> {
-    let tag = newest_tag()?;
-    release_version(&tag).with_context(|| format!("invalid release version {tag}"))
+    let release = fetch_release(None)?;
+    release_version(&release.tag_name)
+        .with_context(|| format!("invalid release version {}", release.tag_name))
 }
 
 fn token() -> Result<String> {
@@ -243,16 +267,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn newest_picks_the_highest_agents_version_and_ignores_other_packages() {
+    fn newest_first_keeps_stable_agents_tags_in_version_order() {
         let tags = [
             "agents-v0.9.0",
             "runners-v9.9.9",
             "agents-v0.12.0",
+            "agents-v0.13.0-rc.1",
             "primer-0123abcd",
             "agents-v0.11.3",
             "agents-vnot-a-version",
         ];
-        assert_eq!(newest(tags.into_iter()).as_deref(), Some("agents-v0.12.0"));
-        assert_eq!(newest(["runners-v0.1.19"].into_iter()), None);
+        assert_eq!(
+            newest_first(tags.into_iter()),
+            ["agents-v0.12.0", "agents-v0.11.3", "agents-v0.9.0"]
+        );
+        assert!(newest_first(["runners-v0.1.19"].into_iter()).is_empty());
     }
 }

@@ -18,7 +18,8 @@ agents moves into `agents/` in the private `tomagranate/hangar` repo. Releases a
 ### Standalone
 
 ```sh
-gh api -H "Accept: application/vnd.github.raw" repos/tomagranate/hangar/contents/agents/install.sh | bash
+gh api -H "Accept: application/vnd.github.raw" repos/tomagranate/hangar/contents/agents/install.sh > /tmp/agents-install.sh \
+  && bash /tmp/agents-install.sh
 ```
 
 Set `INSTALL_DIR` to change the destination. The default is `~/.local/bin`.

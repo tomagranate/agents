@@ -27,10 +27,11 @@ resolve_version() {
     printf '%s' "${VERSION#v}"
     return
   fi
-  # Hangar also tags other packages, so pick the highest agents-v tag.
+  # Hangar also tags other packages. Pick the highest stable agents-vX.Y.Z tag.
   gh api "repos/$REPO/git/matching-refs/tags/agents-v" --jq '.[].ref' \
     | sed -n 's|^refs/tags/agents-v||p' \
-    | sort -V \
+    | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+    | sort -t. -k1,1n -k2,2n -k3,3n \
     | tail -1
 }
 
