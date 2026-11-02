@@ -13,28 +13,24 @@ The CLI is one Rust binary. It does not require Python, Node.js, or a separate S
 
 ## Install
 
+agents moves into `agents/` in the private `tomagranate/hangar` repo. Releases are tagged `agents-vX.Y.Z` there. Install and update need the GitHub CLI, signed in with `gh auth login`. Primer installs agents on Tom's machines.
+
 ### Standalone
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/tomagranate/agents/master/install.sh | sh
+gh api -H "Accept: application/vnd.github.raw" repos/tomagranate/hangar/contents/agents/install.sh > /tmp/agents-install.sh \
+  && bash /tmp/agents-install.sh
 ```
 
 Set `INSTALL_DIR` to change the destination. The default is `~/.local/bin`.
 
 Set `SKIP_INIT=1` to skip initial configuration.
 
-### Homebrew
-
-```sh
-brew install tomagranate/tap/agents
-agents init
-```
-
 ### From source
 
 ```sh
-git clone https://github.com/tomagranate/agents.git
-cd agents
+gh repo clone tomagranate/hangar
+cd hangar/agents
 cargo install --path .
 agents init
 ```
