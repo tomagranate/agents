@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Install the standalone agents binary.
+# Install the standalone agents binary from the private tomagranate/hangar
+# repo. Needs the GitHub CLI, signed in: `gh auth login`.
 set -euo pipefail
 
-REPO="tomagranate/agents"
+REPO="tomagranate/hangar"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 INSTALL_TEMPORARY=""
 
@@ -26,9 +27,11 @@ resolve_version() {
     printf '%s' "${VERSION#v}"
     return
   fi
-  curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
-    | sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' \
-    | head -1
+  # Hangar also tags other packages, so pick the highest agents-v tag.
+  gh api "repos/$REPO/git/matching-refs/tags/agents-v" --jq '.[].ref' \
+    | sed -n 's|^refs/tags/agents-v||p' \
+    | sort -V \
+    | tail -1
 }
 
 release_target() {
@@ -55,10 +58,9 @@ sha256_file() {
 install_release() {
   local version="$1" target="$2" temporary="$3"
   local asset="agents-$target.tar.gz"
-  local base="https://github.com/$REPO/releases/download/v$version"
   printf 'Downloading agents %s for %s...\n' "$version" "$target"
-  curl -fsSL "$base/$asset" -o "$temporary/$asset"
-  curl -fsSL "$base/$asset.sha256" -o "$temporary/$asset.sha256"
+  gh release download "agents-v$version" --repo "$REPO" \
+    --pattern "$asset" --pattern "$asset.sha256" --dir "$temporary"
   local expected actual
   expected="$(awk '{print $1}' "$temporary/$asset.sha256")"
   actual="$(sha256_file "$temporary/$asset")"
@@ -73,10 +75,10 @@ install_master() {
   local temporary="$1"
   need cargo
   printf 'Building agents from master...\n'
-  curl -fsSL "https://github.com/$REPO/archive/refs/heads/master.tar.gz" -o "$temporary/master.tar.gz"
+  gh api "repos/$REPO/tarball/master" > "$temporary/master.tar.gz"
   tar -xzf "$temporary/master.tar.gz" -C "$temporary"
   local source
-  source="$(find "$temporary" -maxdepth 1 -type d -name 'agents-*' | head -1)"
+  source="$(find "$temporary" -maxdepth 2 -type d -path '*/agents' | head -1)"
   [[ -f "$source/Cargo.toml" ]] || fail "source archive is invalid"
   cargo build --locked --release --manifest-path "$source/Cargo.toml"
   mkdir -p "$INSTALL_DIR"
@@ -84,7 +86,7 @@ install_master() {
 }
 
 main() {
-  need curl
+  need gh
   need tar
   need install
   local version target temporary

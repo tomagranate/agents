@@ -13,7 +13,10 @@ use tempfile::{NamedTempFile, tempdir};
 
 use crate::util;
 
-const REPOSITORY: &str = "tomagranate/agents";
+// Releases live in the private Hangar monorepo, tagged agents-vX.Y.Z. Every
+// request needs a GitHub token: GH_TOKEN, GITHUB_TOKEN, or `gh auth token`.
+const REPOSITORY: &str = "tomagranate/hangar";
+const TAG_PREFIX: &str = "agents-v";
 
 #[derive(Debug, Clone, Args)]
 pub struct UpdateArgs {
@@ -34,13 +37,20 @@ struct Release {
 #[derive(Deserialize)]
 struct Asset {
     name: String,
-    browser_download_url: String,
+    /// The API URL. Private repos serve asset bytes only through it.
+    url: String,
+}
+
+#[derive(Deserialize)]
+struct GitRef {
+    #[serde(rename = "ref")]
+    name: String,
 }
 
 pub fn run(args: UpdateArgs) -> Result<()> {
     let current = Version::parse(env!("CARGO_PKG_VERSION"))?;
     let release = fetch_release(args.version.as_deref())?;
-    let latest = Version::parse(release.tag_name.trim_start_matches('v'))
+    let latest = release_version(&release.tag_name)
         .with_context(|| format!("invalid release version {}", release.tag_name))?;
     if latest <= current && args.version.is_none() {
         println!("agents {current} is current.");
@@ -53,14 +63,10 @@ pub fn run(args: UpdateArgs) -> Result<()> {
 
     let executable = std::env::current_exe()?.canonicalize()?;
     if is_homebrew_install(&executable) {
-        if args.version.is_some() {
-            bail!("Homebrew installs the newest formula version only; omit --version");
-        }
-        println!("Updating the Homebrew installation...");
-        util::command_status("brew", ["update"], None)?;
-        util::command_status("brew", ["upgrade", "agents"], None)?;
-        println!("Updated agents through Homebrew.");
-        return Ok(());
+        bail!(
+            "agents {latest} is out, but Homebrew can no longer install agents. \
+             Run `brew uninstall agents`, then `primer update` to install it from Hangar."
+        );
     }
 
     install_standalone(&release, &executable)?;
@@ -69,30 +75,81 @@ pub fn run(args: UpdateArgs) -> Result<()> {
 }
 
 fn fetch_release(version: Option<&str>) -> Result<Release> {
-    let endpoint = if let Some(version) = version {
-        format!(
-            "https://api.github.com/repos/{REPOSITORY}/releases/tags/v{}",
-            version.trim_start_matches('v')
-        )
-    } else {
-        format!("https://api.github.com/repos/{REPOSITORY}/releases/latest")
+    let tag = match version {
+        Some(version) => format!("{TAG_PREFIX}{}", version.trim_start_matches('v')),
+        None => newest_tag()?,
     };
-    reqwest::blocking::Client::new()
-        .get(endpoint)
+    get(&format!(
+        "https://api.github.com/repos/{REPOSITORY}/releases/tags/{tag}"
+    ))?
+    .json()
+    .context("could not read the GitHub release")
+}
+
+/// Finds the highest agents-vX.Y.Z tag. Hangar also publishes releases for
+/// other packages, so GitHub's "latest release" is not the agents release.
+fn newest_tag() -> Result<String> {
+    let refs: Vec<GitRef> = get(&format!(
+        "https://api.github.com/repos/{REPOSITORY}/git/matching-refs/tags/{TAG_PREFIX}"
+    ))?
+    .json()
+    .context("could not read the agents release tags")?;
+    newest(
+        refs.iter()
+            .filter_map(|r| r.name.strip_prefix("refs/tags/")),
+    )
+    .context("no agents release found")
+}
+
+/// Picks the highest version among agents-vX.Y.Z tags and ignores the rest.
+fn newest<'a>(tags: impl Iterator<Item = &'a str>) -> Option<String> {
+    tags.filter_map(|tag| release_version(tag).map(|version| (version, tag)))
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .map(|(_, tag)| tag.to_owned())
+}
+
+fn release_version(tag: &str) -> Option<Version> {
+    Version::parse(tag.strip_prefix(TAG_PREFIX)?).ok()
+}
+
+pub(crate) fn latest_version() -> Result<Version> {
+    let tag = newest_tag()?;
+    release_version(&tag).with_context(|| format!("invalid release version {tag}"))
+}
+
+fn token() -> Result<String> {
+    for name in ["GH_TOKEN", "GITHUB_TOKEN"] {
+        if let Ok(value) = std::env::var(name)
+            && !value.trim().is_empty()
+        {
+            return Ok(value.trim().to_owned());
+        }
+    }
+    let output = util::command_output("gh", ["auth", "token"], None)
+        .context("agents releases are private: install gh and run `gh auth login`")?;
+    let token = String::from_utf8(output.stdout)?.trim().to_owned();
+    if token.is_empty() {
+        bail!("gh has no token: run `gh auth login`");
+    }
+    Ok(token)
+}
+
+fn get(url: &str) -> Result<reqwest::blocking::Response> {
+    request(url, "application/vnd.github+json")
+}
+
+fn request(url: &str, accept: &str) -> Result<reqwest::blocking::Response> {
+    Ok(reqwest::blocking::Client::new()
+        .get(url)
         .header(
             "User-Agent",
             format!("agents/{}", env!("CARGO_PKG_VERSION")),
         )
+        .header("Accept", accept)
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .bearer_auth(token()?)
         .send()?
-        .error_for_status()?
-        .json()
-        .context("could not read the GitHub release")
-}
-
-pub(crate) fn latest_version() -> Result<Version> {
-    let release = fetch_release(None)?;
-    Version::parse(release.tag_name.trim_start_matches('v'))
-        .with_context(|| format!("invalid release version {}", release.tag_name))
+        .error_for_status()?)
 }
 
 fn is_homebrew_install(executable: &Path) -> bool {
@@ -119,8 +176,8 @@ fn install_standalone(release: &Release, executable: &Path) -> Result<()> {
         .with_context(|| format!("release does not contain {checksum_name}"))?;
 
     println!("Downloading {}...", release.tag_name);
-    let archive_bytes = download(&archive.browser_download_url)?;
-    let checksum_text = String::from_utf8(download(&checksum.browser_download_url)?)?;
+    let archive_bytes = download(&archive.url)?;
+    let checksum_text = String::from_utf8(download(&checksum.url)?)?;
     let expected = checksum_text
         .split_whitespace()
         .next()
@@ -156,14 +213,7 @@ fn install_standalone(release: &Release, executable: &Path) -> Result<()> {
 }
 
 fn download(url: &str) -> Result<Vec<u8>> {
-    let mut response = reqwest::blocking::Client::new()
-        .get(url)
-        .header(
-            "User-Agent",
-            format!("agents/{}", env!("CARGO_PKG_VERSION")),
-        )
-        .send()?
-        .error_for_status()?;
+    let mut response = request(url, "application/octet-stream")?;
     let mut bytes = Vec::new();
     response.read_to_end(&mut bytes)?;
     Ok(bytes)
@@ -185,5 +235,24 @@ fn release_target() -> Result<&'static str> {
         ("linux", "x86_64") => Ok("x86_64-unknown-linux-gnu"),
         ("linux", "aarch64") => Ok("aarch64-unknown-linux-gnu"),
         (os, arch) => bail!("no release build for {os}/{arch}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn newest_picks_the_highest_agents_version_and_ignores_other_packages() {
+        let tags = [
+            "agents-v0.9.0",
+            "runners-v9.9.9",
+            "agents-v0.12.0",
+            "primer-0123abcd",
+            "agents-v0.11.3",
+            "agents-vnot-a-version",
+        ];
+        assert_eq!(newest(tags.into_iter()).as_deref(), Some("agents-v0.12.0"));
+        assert_eq!(newest(["runners-v0.1.19"].into_iter()), None);
     }
 }
